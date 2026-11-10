@@ -93,6 +93,21 @@ function stringAt(pointer, length) {
     return decoder.decode(view(pointer, length));
 }
 
+function writeStringResult(value, output, capacity) {
+    if (value === null || value === undefined) return -1n;
+    const bytes = encoder.encode(String(value));
+    const available = offset(capacity);
+    if (available < bytes.length) return BigInt(bytes.length);
+    view(output, bytes.length).set(bytes);
+    return BigInt(bytes.length);
+}
+
+function commitUrl(url, replace) {
+    const target = url.pathname + url.search + url.hash;
+    if (replace) history.replaceState(null, "", target);
+    else history.pushState(null, "", target);
+}
+
 function cStringLength(pointer) {
     const start = offset(pointer);
     const bytes = new Uint8Array(memory.buffer);
@@ -360,6 +375,81 @@ const imports = {
         js_dom_add_event_listener(id, eventName, eventNameLength, callbackIndex, data) {
             const event = stringAt(eventName, eventNameLength);
             node(id).addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, id, data));
+        },
+        js_dom_add_window_event_listener(eventName, eventNameLength, callbackIndex, data) {
+            const event = stringAt(eventName, eventNameLength);
+            window.addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, 0, data));
+        },
+        js_dom_clear(id) {
+            const element = node(id);
+            while (element.firstChild) {
+                const child = element.firstChild;
+                const childId = domNodeIds.get(child);
+                if (childId !== undefined) {
+                    domNodes.delete(childId);
+                    domNodeIds.delete(child);
+                }
+                element.removeChild(child);
+            }
+        },
+        js_dom_value_length(id) {
+            const value = node(id).value;
+            if (value === undefined || value === null) return -1n;
+            return BigInt(encoder.encode(String(value)).length);
+        },
+        js_dom_attribute_length(id, name, nameLength) {
+            const value = node(id).getAttribute(stringAt(name, nameLength));
+            if (value === null) return -1n;
+            return BigInt(encoder.encode(value).length);
+        },
+        js_dom_url_length() {
+            return BigInt(encoder.encode(window.location.href).length);
+        },
+        js_dom_path_length() {
+            return BigInt(encoder.encode(window.location.pathname).length);
+        },
+        js_dom_search_length() {
+            return BigInt(encoder.encode(window.location.search).length);
+        },
+        js_dom_hash_length() {
+            return BigInt(encoder.encode(window.location.hash).length);
+        },
+        js_dom_param_length(name, nameLength) {
+            const value = new URL(window.location.href).searchParams.get(stringAt(name, nameLength));
+            if (value === null) return -1n;
+            return BigInt(encoder.encode(value).length);
+        },
+        js_dom_get_url(output, capacity) {
+            return writeStringResult(window.location.href, output, capacity);
+        },
+        js_dom_set_url(url, length, replace) {
+            const target = stringAt(url, length);
+            if (replace !== 0) history.replaceState(null, "", target);
+            else history.pushState(null, "", target);
+        },
+        js_dom_get_path(output, capacity) {
+            return writeStringResult(window.location.pathname, output, capacity);
+        },
+        js_dom_get_search(output, capacity) {
+            return writeStringResult(window.location.search, output, capacity);
+        },
+        js_dom_get_hash(output, capacity) {
+            return writeStringResult(window.location.hash, output, capacity);
+        },
+        js_dom_get_param(name, nameLength, output, capacity) {
+            const key = stringAt(name, nameLength);
+            const value = new URL(window.location.href).searchParams.get(key);
+            return writeStringResult(value, output, capacity);
+        },
+        js_dom_set_param(name, nameLength, value, valueLength, replace) {
+            const url = new URL(window.location.href);
+            url.searchParams.set(stringAt(name, nameLength), stringAt(value, valueLength));
+            commitUrl(url, replace !== 0);
+        },
+        js_dom_remove_param(name, nameLength, replace) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete(stringAt(name, nameLength));
+            commitUrl(url, replace !== 0);
         },
     },
 };

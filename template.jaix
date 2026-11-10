@@ -1,31 +1,62 @@
 #template
-TemplateBadge :: (label: string) {
-    <span class="jai-badge">{label}</span>
+AppShell :: () {
+    <div class="app">
+        <header class="app-header">
+            <div>
+                <h1>Jai SPA</h1>
+                <p class="muted">Routed with the address bar, rendered with Jai.</p>
+            </div>
+            <nav class="tabs">
+                <button id="nav-counter" class="tab">Counter</button>
+                <button id="nav-todos" class="tab">Todos</button>
+            </nav>
+        </header>
+        <section id="view" class="view"></section>
+        <footer class="app-footer">
+            <p class="muted">View and filter state live in Jai. The address bar is left alone.</p>
+        </footer>
+    </div>
 }
 
 #template
-DemoCard :: (count: s32, show_extra: bool) {
-    <section class="jai-card" role="region">
-        <h1>Jai-generated node tree</h1>
-        <p>One template function returns its root DOM_Node.</p>
-        <p>Nested template: {TemplateBadge("reusable component")}</p>
-        <p>There are {count} {ifx count == 1 then "item" else "items"}.</p>
-        {if show_extra {
-            <p id="conditional">This node was emitted inside a Jai if block.</p>
-        } else {
-            <p id="conditional">The other Jai branch was emitted.</p>
-        }}
-        <ul>
-            {for i: 0..count {
-                <li>Item {i}</li>
-            }}
-        </ul>
-        {if count == {
-            case 0; <p>The count is zero.</p>
-            case; <p>The count is nonzero.</p>
-        }}
-        <button id="jai-button" class="jai-button" title="Click to call Jai">Click me</button>
-        <input id="name-input" type="text" placeholder="Type to update the preview" />
-        <p id="name-preview">Your input will appear here.</p>
+CounterView :: () {
+    <section id="counter-view" class="panel">
+        <h2>Counter</h2>
+        <p class="muted">The count lives in Jai memory and is read back through the DOM.</p>
+        <div class="counter-row">
+            <button id="counter-dec" class="btn">-</button>
+            <output id="counter-value" class="counter-value">0</output>
+            <button id="counter-inc" class="btn">+</button>
+        </div>
+        <button id="counter-reset" class="btn btn-ghost">Reset</button>
     </section>
 }
+
+#template
+TodosView :: () {
+    <section id="todos-view" class="panel">
+        <h2>Todos</h2>
+        <p class="muted">Add items, toggle them, filter, and switch views without a reload.</p>
+        <div class="todo-form">
+            <input id="todo-input" class="todo-input" type="text" placeholder="What needs doing?" />
+            <button id="todo-add" class="btn" onclick="{todo_add_clicked}">Add</button>
+        </div>
+        <div class="filters">
+            <button id="filter-all"    onclick="{filter_all_clicked}" class="chip">All</button>
+            <button id="filter-active" onclick="{filter_active_clicked}" class="chip">Active</button>
+            <button id="filter-done"   onclick="{filter_done_clicked}" class="chip">Done</button>
+        </div>
+        <ul id="todo-list" class="todo-list"></ul>
+        <p id="todo-empty" class="muted empty">No todos match this filter.</p>
+        <p id="todo-count" class="muted"></p>
+    </section>
+}
+
+// TODO: need to continue this later...
+//       this mark too so the template is pleasant to use...
+// #template
+// TodosViewRow :: (todo: *Todo_Item) {
+//     <li class='{ifx todo.done then "todo done" else "todo"}'>
+//       <button> </button>
+//     </li>
+// }

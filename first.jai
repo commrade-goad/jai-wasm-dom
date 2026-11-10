@@ -22,11 +22,13 @@ Template :: #import "Template";
 
     set_build_options(options, workspace);
 
-    source_path := tprint("%main.jaix", #filepath);
+    source_path := tprint("%template.jaix", #filepath);
     source, ok := File.read_entire_file(source_path);
     assert(ok, tprint("could not read jaix source: %", source_path));
     transformed := Template.compile_jaix_to_jai(source);
     free(source);
     assert(transformed.error.count == 0, transformed.error);
     add_build_string(transformed.jai, workspace);
+
+    add_build_file("main.jai", workspace);
 }

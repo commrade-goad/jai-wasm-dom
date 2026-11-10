@@ -49,38 +49,6 @@ jai_dom_event_dispatch :: (callback: DOM_Event_Handler, element: DOM_Node) #c_ca
     });
 }
 
-#template
-TemplateBadge :: (label: string) {
-    <span class="jai-badge">{label}</span>
-}
-
-#template
-DemoCard :: (count: s32, show_extra: bool) {
-    <section class="jai-card" role="region">
-        <h1>Jai-generated node tree</h1>
-        <p>One template function returns its root DOM_Node.</p>
-        <p>Nested template: {TemplateBadge("reusable component")}</p>
-        <p>There are {count} {ifx count == 1 then "item" else "items"}.</p>
-        {if show_extra {
-            <p id="conditional">This node was emitted inside a Jai if block.</p>
-        } else {
-            <p id="conditional">The other Jai branch was emitted.</p>
-        }}
-        <ul>
-            {for i: 0..count {
-                <li>Item {i}</li>
-            }}
-        </ul>
-        {if count == {
-            case 0; <p>The count is zero.</p>
-            case; <p>The count is nonzero.</p>
-        }}
-        <button id="jai-button" class="jai-button" title="Click to call Jai" onclick="{button_clicked}">Click me</button>
-        <input id="name-input" type="text" placeholder="Type to update the preview" />
-        <p id="name-preview">Your input will appear here.</p>
-    </section>
-}
-
 #program_export "app_init"
 app_init :: () #c_call #no_context {
     with_wasm_context(#code {
@@ -118,4 +86,3 @@ app_init :: () #c_call #no_context {
     });
 }
 
-main :: () {}

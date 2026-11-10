@@ -322,6 +322,18 @@ const imports = {
         js_dom_set_text(id, text, textLength) {
             node(id).textContent = stringAt(text, textLength);
         },
+        js_dom_get_value(id, output, capacity) {
+            const value = node(id).value;
+            if (value === undefined || value === null) return -1n;
+            const bytes = encoder.encode(String(value));
+            const available = offset(capacity);
+            if (available < bytes.length) return BigInt(bytes.length);
+            view(output, bytes.length).set(bytes);
+            return BigInt(bytes.length);
+        },
+        js_dom_set_value(id, value, valueLength) {
+            node(id).value = stringAt(value, valueLength);
+        },
         js_dom_set_attribute(id, name, nameLength, value, valueLength) {
             node(id).setAttribute(stringAt(name, nameLength), stringAt(value, valueLength));
         },
@@ -346,14 +358,8 @@ const imports = {
             node(id).style.setProperty(property, stringAt(value, valueLength));
         },
         js_dom_add_event_listener(id, eventName, eventNameLength, callbackIndex) {
-            const table = api.__indirect_function_table;
-            if (!table) throw new Error("WASM table not exported; cannot invoke Jai event callbacks");
-            // In this WASM64 module function-table indices arrive as i64/BigInt.
-            const tableIndex = typeof callbackIndex === "bigint" ? callbackIndex : BigInt(callbackIndex);
-            const callback = table.get(tableIndex);
-            if (typeof callback !== "function") throw new Error("Invalid Jai DOM event callback");
             const event = stringAt(eventName, eventNameLength);
-            node(id).addEventListener(event, () => callback(id));
+            node(id).addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, id));
         },
     },
 };

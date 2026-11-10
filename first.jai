@@ -3,6 +3,16 @@
 File :: #import "File";
 Template :: #import "Template";
 
+add_jaix :: (name: string, w: Workspace) #expand {
+    source_path := tprint("%%", #filepath, name);
+    source, ok := File.read_entire_file(source_path);
+    assert(ok, tprint("could not read jaix source: %", source_path));
+    transformed := Template.compile_jaix_to_jai(source);
+    free(source);
+    assert(transformed.error.count == 0, transformed.error);
+    add_build_string(transformed.jai, w);
+}
+
 #run {
     set_build_options_dc(.{ do_output = false });
 
@@ -20,15 +30,8 @@ Template :: #import "Template";
     options.llvm_options.target_system_features = "+bulk-memory,+sign-ext";
     options.additional_linker_arguments = .["-z", "stack-size=1048576"];
 
+    add_jaix("template.jaix", workspace);
     set_build_options(options, workspace);
-
-    source_path := tprint("%template.jaix", #filepath);
-    source, ok := File.read_entire_file(source_path);
-    assert(ok, tprint("could not read jaix source: %", source_path));
-    transformed := Template.compile_jaix_to_jai(source);
-    free(source);
-    assert(transformed.error.count == 0, transformed.error);
-    add_build_string(transformed.jai, workspace);
 
     add_build_file("main.jai", workspace);
 }

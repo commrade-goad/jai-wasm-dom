@@ -24,7 +24,7 @@ DemoCard :: (count: s32, show_extra: bool) {
             case 0; <p>The count is zero.</p>
             case; <p>The count is nonzero.</p>
         }}
-        <button id="jai-button" class="jai-button" title="Click to call Jai" onclick="{button_clicked}">Click me</button>
+        <button id="jai-button" class="jai-button" title="Click to call Jai">Click me</button>
         <input id="name-input" type="text" placeholder="Type to update the preview" />
         <p id="name-preview">Your input will appear here.</p>
     </section>

@@ -4,7 +4,7 @@ DOM_Node :: #type,distinct s32;
 DOM_NULL :: cast(DOM_Node) 0;
 // Jai-callable callback. The host stores its WASM table index and asks the
 // exported Jai dispatcher to invoke it with the persistent runtime context.
-DOM_Event_Handler :: #type (element: DOM_Node);
+DOM_Event_Handler :: #type (element: DOM_Node, data: *void);
 
 DOM_Props :: struct {
     id: string;
@@ -29,7 +29,7 @@ js_dom_set_attribute :: (element: DOM_Node, name: *u8, name_length: s64, value: 
 js_dom_get_attribute :: (element: DOM_Node, name: *u8, name_length: s64, output: *u8, capacity: s64) -> s64 #foreign;
 js_dom_remove_attribute :: (element: DOM_Node, name: *u8, name_length: s64) -> s32 #foreign;
 js_dom_set_style :: (element: DOM_Node, name: *u8, name_length: s64, value: *u8, value_length: s64) #foreign;
-js_dom_add_event_listener :: (element: DOM_Node, event_name: *u8, event_name_length: s64, callback: DOM_Event_Handler) #foreign;
+js_dom_add_event_listener :: (element: DOM_Node, event_name: *u8, event_name_length: s64, callback: DOM_Event_Handler, data: *void) #foreign;
 
 dom_find :: (selector: string) -> DOM_Node #no_context {
     return js_dom_find(selector.data, selector.count);
@@ -87,7 +87,11 @@ dom_remove_attribute :: (element: DOM_Node, name: string) -> bool #no_context {
 }
 
 dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Event_Handler) #no_context {
-    js_dom_add_event_listener(element, event_name.data, event_name.count, callback);
+    js_dom_add_event_listener(element, event_name.data, event_name.count, callback, null);
+}
+
+dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Event_Handler, data: *$T) #no_context {
+    js_dom_add_event_listener(element, event_name.data, event_name.count, callback, cast(*void)data);
 }
 
 dom_style :: (element: DOM_Node, name: string, value: string) #no_context {

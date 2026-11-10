@@ -357,9 +357,9 @@ const imports = {
             const property = stringAt(name, nameLength).replace(/[A-Z]/g, c => `-${c.toLowerCase()}`);
             node(id).style.setProperty(property, stringAt(value, valueLength));
         },
-        js_dom_add_event_listener(id, eventName, eventNameLength, callbackIndex) {
+        js_dom_add_event_listener(id, eventName, eventNameLength, callbackIndex, data) {
             const event = stringAt(eventName, eventNameLength);
-            node(id).addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, id));
+            node(id).addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, id, data));
         },
     },
 };

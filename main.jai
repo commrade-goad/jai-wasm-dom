@@ -3,7 +3,10 @@
 Runtime :: #import "Runtime_Support";
 
 wasm_context: *#Context;
-click_count: s32;
+
+Click_Data :: struct {
+    count: s32;
+}
 
 ensure_wasm_context :: () -> bool #no_context {
     if !wasm_context wasm_context = Runtime.__jai_runtime_init(0, null);
@@ -18,13 +21,15 @@ with_wasm_context :: (body: Code) #expand {
     }
 }
 
-button_clicked :: (element: DOM_Node) {
-    click_count += 1;
-    dom_text(element, tprint("Clicked % times — callback ran in Jai", click_count));
-    dom_set_attribute(element, "data-clicked", tprint("%", click_count));
+button_clicked :: (element: DOM_Node, data: *void) {
+    state := cast(*Click_Data) data;
+    if state == null return;
+    state.count += 1;
+    dom_text(element, tprint("Clicked % times — callback ran in Jai", state.count));
+    dom_set_attribute(element, "data-clicked", tprint("%", state.count));
 }
 
-name_changed :: (input: DOM_Node) {
+name_changed :: (input: DOM_Node, data: *void) {
     value_buffer: [512] u8;
     value_length := dom_get_value(input, *value_buffer[0], 512);
     preview := dom_find("#name-preview");
@@ -43,15 +48,16 @@ name_changed :: (input: DOM_Node) {
 }
 
 #program_export "jai_dom_event_dispatch"
-jai_dom_event_dispatch :: (callback: DOM_Event_Handler, element: DOM_Node) #c_call #no_context {
+jai_dom_event_dispatch :: (callback: DOM_Event_Handler, element: DOM_Node, data: *void) #c_call #no_context {
     with_wasm_context(#code {
-        callback(element);
+        callback(element, data);
     });
 }
 
 #program_export "app_init"
 app_init :: () #c_call #no_context {
     with_wasm_context(#code {
+        click_data := Click_Data.{};
         main := dom_find("#main");
         if main == DOM_NULL return;
 
@@ -74,6 +80,9 @@ app_init :: () #c_call #no_context {
             preview := dom_find_in(card, "#name-preview");
             if preview != DOM_NULL dom_text(preview, "Type something...");
         }
+
+        jai_button := dom_find_in(card, "#jai-button");
+        if jai_button != DOM_NULL dom_on(jai_button, "click", button_clicked, *click_data);
 
         dom_set_attribute(card, "data-state", "ready");
         value_buffer: [32] u8;

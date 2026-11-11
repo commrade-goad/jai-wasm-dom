@@ -31,9 +31,9 @@ current_view: View = .COUNTER;
 current_filter: Todo_Filter = .ALL;
 
 #program_export "jai_dom_event_dispatch"
-jai_dom_event_dispatch :: (callback: DOM_Event_Handler, element: DOM_Node, data: *void) #c_call #no_context {
+jai_dom_event_dispatch :: (callback: DOM_Callback, element: DOM_Node, data: *void) #c_call #no_context {
     with_wasm_context(#code {
-        callback(element, data);
+        callback(data);
     });
 }
 
@@ -63,12 +63,12 @@ update_nav :: () {
     }
 }
 
-nav_counter_clicked :: (element: DOM_Node, data: *void) {
+nav_counter_clicked :: (data: *void) {
     current_view = .COUNTER;
     render_view();
 }
 
-nav_todos_clicked :: (element: DOM_Node, data: *void) {
+nav_todos_clicked :: (data: *void) {
     current_view = .TODOS;
     render_view();
 }
@@ -96,21 +96,21 @@ update_counter_display :: () {
     if value != DOM_NULL dom_text(value, tprint("%", counter_state.count));
 }
 
-counter_increment :: (element: DOM_Node, data: *void) {
+counter_increment :: (data: *void) {
     state := cast(*Counter_State) data;
     if state == null return;
     state.count += 1;
     update_counter_display();
 }
 
-counter_decrement :: (element: DOM_Node, data: *void) {
+counter_decrement :: (data: *void) {
     state := cast(*Counter_State) data;
     if state == null return;
     state.count -= 1;
     update_counter_display();
 }
 
-counter_reset :: (element: DOM_Node, data: *void) {
+counter_reset :: (data: *void) {
     state := cast(*Counter_State) data;
     if state == null return;
     state.count = 0;
@@ -195,7 +195,7 @@ render_todo_row :: (list: DOM_Node, todo: *Todo_Item) {
     dom_on(remove_button, "click", todo_delete_clicked, todo);
 }
 
-todo_add_clicked :: (element: DOM_Node, data: *void) {
+todo_add_clicked :: (data: *void) {
     input := dom_find("#todo-input");
     if input == DOM_NULL return;
 
@@ -218,14 +218,14 @@ todo_add_clicked :: (element: DOM_Node, data: *void) {
     render_view();
 }
 
-todo_toggle_clicked :: (element: DOM_Node, data: *void) {
+todo_toggle_clicked :: (data: *void) {
     todo := cast(*Todo_Item) data;
     if todo == null return;
     todo.done = !todo.done;
     render_view();
 }
 
-todo_delete_clicked :: (element: DOM_Node, data: *void) {
+todo_delete_clicked :: (data: *void) {
     todo := cast(*Todo_Item) data;
     if todo == null return;
 
@@ -240,17 +240,17 @@ todo_delete_clicked :: (element: DOM_Node, data: *void) {
     render_view();
 }
 
-filter_all_clicked :: (element: DOM_Node, data: *void) {
+filter_all_clicked :: (data: *void) {
     current_filter = .ALL;
     render_view();
 }
 
-filter_active_clicked :: (element: DOM_Node, data: *void) {
+filter_active_clicked :: (data: *void) {
     current_filter = .ACTIVE;
     render_view();
 }
 
-filter_done_clicked :: (element: DOM_Node, data: *void) {
+filter_done_clicked :: (data: *void) {
     current_filter = .DONE;
     render_view();
 }

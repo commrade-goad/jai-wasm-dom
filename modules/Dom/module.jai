@@ -5,6 +5,7 @@ DOM_NULL :: cast(DOM_Node) 0;
 // Jai-callable callback. The host stores its WASM table index and asks the
 // exported Jai dispatcher to invoke it with the persistent runtime context.
 DOM_Event_Handler :: #type (element: DOM_Node, data: *void);
+DOM_Callback :: #type (data: *void);
 
 DOM_Props :: struct {
     id: string;
@@ -12,7 +13,7 @@ DOM_Props :: struct {
     title: string;
     role: string;
     text: string;
-    onclick: DOM_Event_Handler;
+    onclick: DOM_Callback;
 }
 
 // Host-side operations use integer handles so Jai can build and manipulate a
@@ -29,7 +30,7 @@ js_dom_set_attribute :: (element: DOM_Node, name: *u8, name_length: s64, value: 
 js_dom_get_attribute :: (element: DOM_Node, name: *u8, name_length: s64, output: *u8, capacity: s64) -> s64 #foreign;
 js_dom_remove_attribute :: (element: DOM_Node, name: *u8, name_length: s64) -> s32 #foreign;
 js_dom_set_style :: (element: DOM_Node, name: *u8, name_length: s64, value: *u8, value_length: s64) #foreign;
-js_dom_add_event_listener :: (element: DOM_Node, event_name: *u8, event_name_length: s64, callback: DOM_Event_Handler, data: *void) #foreign;
+js_dom_add_event_listener :: (element: DOM_Node, event_name: *u8, event_name_length: s64, callback: DOM_Callback, data: *void) #foreign;
 js_dom_add_window_event_listener :: (event_name: *u8, event_name_length: s64, callback: DOM_Event_Handler, data: *void) #foreign;
 js_dom_clear :: (element: DOM_Node) #foreign;
 
@@ -109,11 +110,11 @@ dom_remove_attribute :: (element: DOM_Node, name: string) -> bool #no_context {
     return js_dom_remove_attribute(element, name.data, name.count) != 0;
 }
 
-dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Event_Handler) #no_context {
+dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Callback) #no_context {
     js_dom_add_event_listener(element, event_name.data, event_name.count, callback, null);
 }
 
-dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Event_Handler, data: *$T) #no_context {
+dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Callback, data: *$T) #no_context {
     js_dom_add_event_listener(element, event_name.data, event_name.count, callback, cast(*void)data);
 }
 

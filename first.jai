@@ -3,6 +3,8 @@
 File :: #import "File";
 Template :: #import "Template";
 
+DEBUG :: false;
+
 add_jaix :: (name: string, w: Workspace) #expand {
     source_path := tprint("%%", #filepath, name);
     source, ok := File.read_entire_file(source_path);
@@ -10,7 +12,13 @@ add_jaix :: (name: string, w: Workspace) #expand {
     transformed := Template.compile_jaix_to_jai(source);
     free(source);
     assert(transformed.error.count == 0, transformed.error);
-    add_build_string(transformed.jai, w);
+    if DEBUG {
+        output_path := tprint("%.jai", source_path);
+        File.write_entire_file(output_path, transformed.jai);
+        add_build_file(output_path, w);
+    } else {
+        add_build_string(transformed.jai, w);
+    }
 }
 
 #run {

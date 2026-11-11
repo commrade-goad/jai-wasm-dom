@@ -175,24 +175,14 @@ update_filter_chips :: (panel: DOM_Node) {
 }
 
 render_todo_row :: (list: DOM_Node, todo: *Todo_Item) {
-    row_class: string = "todo";
-    if todo.done row_class = "todo done";
-    row := dom_create("li", .{ class = row_class });
+    row := TodoRow(todo.id, todo.text, todo.done);
     dom_insert(list, row);
 
-    toggle_text: string = "○";
-    if todo.done toggle_text = "✓";
-    toggle := dom_create("button", .{ class = "todo-toggle", text = toggle_text });
-    dom_insert(row, toggle);
-    dom_on(toggle, "click", todo_toggle_clicked, todo);
+    toggle := dom_find_in(row, ".todo-toggle");
+    if toggle != DOM_NULL dom_on(toggle, "click", todo_toggle_clicked, todo);
 
-    label := dom_create("span", .{ class = "todo-text" });
-    dom_text(label, todo.text);
-    dom_insert(row, label);
-
-    remove_button := dom_create("button", .{ class = "todo-delete", text = "Delete" });
-    dom_insert(row, remove_button);
-    dom_on(remove_button, "click", todo_delete_clicked, todo);
+    remove_button := dom_find_in(row, ".todo-delete");
+    if remove_button != DOM_NULL dom_on(remove_button, "click", todo_delete_clicked, todo);
 }
 
 todo_add_clicked :: (data: *void) {

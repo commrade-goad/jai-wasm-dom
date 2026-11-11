@@ -9,7 +9,7 @@ add_jaix :: (name: string, w: Workspace) #expand {
     source_path := tprint("%%", #filepath, name);
     source, ok := File.read_entire_file(source_path);
     assert(ok, tprint("could not read jaix source: %", source_path));
-    transformed := Template.compile_jaix_to_jai(source);
+    transformed := Template.compile_jaix_to_jai(source, source_path);
     free(source);
     assert(transformed.error.count == 0, transformed.error);
     if DEBUG {

@@ -100,6 +100,13 @@ dom_set_attribute :: (element: DOM_Node, name: string, value: string) #no_contex
     js_dom_set_attribute(element, name.data, name.count, value.data, value.count);
 }
 
+// Attribute values from templates can be any Jai value. Strings are passed
+// straight through; numbers, bools and other types are formatted in context.
+dom_set_attribute_value :: inline (element: DOM_Node, name: string, value: $T) #expand {
+    #if T == string dom_set_attribute(element, name, value);
+    else dom_set_attribute(element, name, tprint("%", value));
+}
+
 // Returns the copied byte count, -1 when missing, or the required size when
 // the caller's buffer is too small. Values are byte strings, not C strings.
 dom_get_attribute :: (element: DOM_Node, name: string, output: *u8, capacity: s64) -> s64 #no_context {

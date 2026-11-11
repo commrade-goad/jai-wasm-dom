@@ -4,7 +4,7 @@ AppShell :: () {
         <header class="app-header">
             <div>
                 <h1>Jai SPA</h1>
-                <p class="muted">Routed with the address bar, rendered with Jai.</p>
+                <p class="muted">Templates build the DOM; Jai owns the state.</p>
             </div>
             <nav class="tabs">
                 <button id="nav-counter" class="tab">Counter</button>
@@ -52,11 +52,11 @@ TodosView :: () {
     </section>
 }
 
-// TODO: need to continue this later...
-//       this mark too so the template is pleasant to use...
-// #template
-// TodosViewRow :: (todo: *Todo_Item) {
-//     <li class='{ifx todo.done then "todo done" else "todo"}'>
-//       <button> </button>
-//     </li>
-// }
+#template
+TodoRow :: (id: s32, text: string, done: bool) {
+    <li class="{ ifx done then "todo done" else "todo" }" data-todo-id="{id}">
+        <button class="todo-toggle">{ ifx done then "✓" else "○" }</button>
+        <span class="todo-text">{text}</span>
+        <button class="todo-delete">Delete</button>
+    </li>
+}

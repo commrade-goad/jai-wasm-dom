@@ -5,11 +5,12 @@ XML :: #import "XML";
 Template_Result :: struct {
     jai: string;
     error: string;
+    error_offset: s64;
 }
 
 // Converts a .jaix file into ordinary Jai source. A template function's
 // signature is retained and receives an inferred DOM_Node return type.
-compile_jaix_to_jai :: (source: string) -> Template_Result {
+compile_jaix_to_jai :: (source: string, filename: string = "<template>") -> Template_Result {
     result: Template_Result;
     output: String_Builder;
     copied_until: s64;
@@ -24,52 +25,46 @@ compile_jaix_to_jai :: (source: string) -> Template_Result {
 
         body_open := find_function_body_open(source, declaration_start);
         if body_open < 0 {
-            result.error = "#template must precede a Jai procedure declaration";
-            return result;
+            return template_error(filename, source, marker_start, "#template must precede a Jai procedure declaration");
         }
         body_close := find_matching_brace(source, body_open);
         if body_close < 0 {
-            result.error = "unclosed #template function body";
-            return result;
+            return template_error(filename, source, body_open, "unclosed #template function body");
         }
 
         header := trim(slice(source, declaration_start, body_open - declaration_start));
         if find_index_from_left(header, "::") < 0 {
-            result.error = "#template must precede a named Jai procedure";
-            return result;
+            return template_error(filename, source, declaration_start, "#template must precede a named Jai procedure");
         }
 
         xml_source := slice(source, body_open + 1, body_close - body_open - 1);
+        xml_offset := body_open + 1;
         parsed := XML.parse(xml_source);
         if parsed.error.count {
-            result.error = tprint("XML/template parse error at byte %: %", parsed.error_offset, parsed.error);
-            return result;
+            return template_error(filename, source, xml_offset + parsed.error_offset, tprint("template parse error: %", parsed.error));
         }
+        offset_nodes(parsed.roots, xml_offset);
 
         generator: Generator;
         generator.next_node = 0;
         root_count := 0;
         root_node: string;
-        for parsed.roots {
-            if it.kind == .TEXT && trim(it.text).count == 0 continue;
-            if it.kind != .ELEMENT {
-                result.error = "a template function must have one root element";
-                return result;
+        for root: parsed.roots {
+            if root.kind == .TEXT && trim(root.text).count == 0 continue;
+            if root.kind != .ELEMENT {
+                return template_error(filename, source, root.offset, "a template function must have one root element");
             }
             root_count += 1;
             if root_count > 1 {
-                result.error = "a template function must have exactly one root element";
-                return result;
+                return template_error(filename, source, root.offset, "a template function must have exactly one root element");
             }
-            root_node = emit_node(*generator, it, "", true);
+            root_node = emit_node(*generator, root, "", true);
         }
         if root_count != 1 {
-            result.error = "a template function must have exactly one root element";
-            return result;
+            return template_error(filename, source, xml_offset, "a template function must have exactly one root element");
         }
         if generator.error.count {
-            result.error = generator.error;
-            return result;
+            return template_error(filename, source, generator.error_offset, generator.error);
         }
 
         append(*output, slice(source, copied_until, marker_start - copied_until));
@@ -94,6 +89,55 @@ Generator :: struct {
     next_node: s64;
     literal_index: s64;
     error: string;
+    error_offset: s64;
+}
+
+template_error :: (filename: string, source: string, offset: s64, message: string) -> Template_Result {
+    result: Template_Result;
+    result.error_offset = offset;
+    result.error = format_error(filename, source, offset, message);
+    return result;
+}
+
+// Formats an error as `path:line:column: message`, which most editors and
+// terminals turn into a jumpable location.
+format_error :: (filename: string, source: string, offset: s64, message: string) -> string {
+    line, column := line_and_column(source, offset);
+    if filename.count == 0 return tprint("%:%: %", line, column, message);
+    return tprint("%:%:%: %", filename, line, column, message);
+}
+
+line_and_column :: (source: string, offset: s64) -> (line: s64, column: s64) #no_context {
+    line = 1;
+    column = 1;
+    limit := offset;
+    if limit < 0 limit = 0;
+    if limit > source.count limit = source.count;
+    i: s64;
+    while i < limit {
+        if source[i] == #char "\n" {
+            line += 1;
+            column = 1;
+        } else column += 1;
+        i += 1;
+    }
+    return line, column;
+}
+
+// The XML parser records offsets relative to the fragment it was given. Shift
+// every node so nested control-block fragments still point into the .jaix file.
+offset_nodes :: (nodes: [] *XML.XML_Node, delta: s64) {
+    for node: nodes {
+        node.offset += delta;
+        for *attribute: node.attributes attribute.offset += delta;
+        offset_nodes(node.children, delta);
+    }
+}
+
+leading_space_count :: (text: string) -> s64 #no_context {
+    i: s64;
+    while i < text.count && is_space(text[i]) i += 1;
+    return i;
 }
 
 is_space :: (c: u8) -> bool #no_context {
@@ -195,6 +239,7 @@ emit_node :: (g: *Generator, node: *XML.XML_Node, parent: string, is_root := fal
         if trim(node.text).count == 0 return "";
         if !parent.count {
             g.error = "text is not allowed outside the template root element";
+            g.error_offset = node.offset;
             return "";
         }
         print_to_builder(*g.body, "    dom_text(%, %);\n", parent, quoted(node.text));
@@ -204,9 +249,10 @@ emit_node :: (g: *Generator, node: *XML.XML_Node, parent: string, is_root := fal
     if node.kind == .JAI_HOLE {
         if !parent.count {
             g.error = "a Jai hole is not allowed outside the template root element";
+            g.error_offset = node.offset;
             return "";
         }
-        emit_hole(g, node.text, parent);
+        emit_hole(g, node, parent);
         return "";
     }
 
@@ -216,29 +262,32 @@ emit_node :: (g: *Generator, node: *XML.XML_Node, parent: string, is_root := fal
     print_to_builder(*g.body, "    % := dom_create(%);\n", variable, quoted(node.name));
     if parent.count print_to_builder(*g.body, "    dom_insert(%, %);\n", parent, variable);
 
-    for attribute: node.attributes emit_attribute(g, variable, attribute.name, attribute.value);
+    for attribute: node.attributes emit_attribute(g, variable, attribute);
     for child: node.children emit_node(g, child, variable);
 
     return variable;
 }
 
-emit_attribute :: (g: *Generator, element: string, name: string, value: string) {
-    if starts_with_hole(value) {
-        expression := trim(slice(value, 1, value.count - 2));
+emit_attribute :: (g: *Generator, element: string, attribute: XML.XML_Attribute) {
+    name := attribute.name;
+    trimmed_value := trim(attribute.value);
+    if starts_with_hole(trimmed_value) {
+        expression := trim(slice(trimmed_value, 1, trimmed_value.count - 2));
         event_name := event_from_attribute(name);
         if event_name.count {
             print_to_builder(*g.body, "    dom_on(%, %, %);\n", element, quoted(event_name), expression);
         } else {
-            print_to_builder(*g.body, "    dom_set_attribute(%, %, tprint(\"%\", %));\n", element, quoted(name), "%", expression);
+            print_to_builder(*g.body, "    dom_set_attribute_value(%, %, %);\n", element, quoted(name), expression);
         }
         return;
     }
 
     if name.count >= 2 && slice(name, 0, 2) == "on" {
         g.error = tprint("event attribute `%` must use a Jai value hole, such as `%={handler}", name, name);
+        g.error_offset = attribute.offset;
         return;
     }
-    print_to_builder(*g.body, "    dom_set_attribute(%, %, %);\n", element, quoted(name), quoted(value));
+    print_to_builder(*g.body, "    dom_set_attribute(%, %, %);\n", element, quoted(name), quoted(attribute.value));
 }
 
 starts_with_hole :: (value: string) -> bool #no_context {
@@ -257,10 +306,11 @@ lowercase :: (text: string) -> string {
     return result;
 }
 
-emit_hole :: (g: *Generator, source: string, parent: string) {
-    code := trim(source);
+emit_hole :: (g: *Generator, node: *XML.XML_Node, parent: string) {
+    code := trim(node.text);
+    code_offset := node.offset + 1 + leading_space_count(node.text);
     if is_block_header(code) {
-        emit_control(g, code, parent);
+        emit_control(g, code, parent, code_offset);
         return;
     }
     if has_statement_terminator(code) {
@@ -329,15 +379,17 @@ control_open :: (source: string, from: s64) -> s64 #no_context {
     return -1;
 }
 
-emit_control :: (g: *Generator, code: string, parent: string) {
+emit_control :: (g: *Generator, code: string, parent: string, code_offset: s64) {
     open := control_open(code, 0);
     if open < 0 {
         g.error = tprint("Jai control block is missing its body: %", code);
+        g.error_offset = code_offset;
         return;
     }
     close := find_matching_brace(code, open);
     if close < 0 {
         g.error = tprint("unclosed Jai control block: %", code);
+        g.error_offset = code_offset;
         return;
     }
 
@@ -345,52 +397,63 @@ emit_control :: (g: *Generator, code: string, parent: string) {
     if is_block_header(header) {
         print_to_builder(*g.body, "    % {\n", header);
         body := slice(code, open + 1, close - open - 1);
-        if !emit_control_body(g, body, parent) return;
+        if !emit_control_body(g, body, parent, code_offset + open + 1) return;
         print_to_builder(*g.body, "    }\n");
     } else {
         g.error = tprint("unsupported template control header `%`", header);
+        g.error_offset = code_offset;
         return;
     }
 
-    remainder := trim(slice(code, close + 1, code.count - close - 1));
+    remainder_raw := slice(code, close + 1, code.count - close - 1);
+    remainder := trim(remainder_raw);
     if remainder.count == 0 return;
+    remainder_offset := code_offset + close + 1 + leading_space_count(remainder_raw);
     if !begins_word(remainder, "else") {
         g.error = tprint("unexpected code after template control block: %", remainder);
+        g.error_offset = remainder_offset;
         return;
     }
 
-    after_else := trim(slice(remainder, 4, remainder.count - 4));
+    after_else_raw := slice(remainder, 4, remainder.count - 4);
+    after_else := trim(after_else_raw);
+    after_else_offset := remainder_offset + 4 + leading_space_count(after_else_raw);
     if after_else.count == 0 {
         g.error = "else must be followed by a Jai block";
+        g.error_offset = remainder_offset;
         return;
     }
     if begins_word(after_else, "if") {
         print_to_builder(*g.body, "    else ");
-        emit_control(g, after_else, parent);
+        emit_control(g, after_else, parent, after_else_offset);
         return;
     }
 
     else_open := control_open(after_else, 0);
     if else_open < 0 || trim(slice(after_else, 0, else_open)).count != 0 {
         g.error = "else must be followed by `{ ... }`";
+        g.error_offset = after_else_offset;
         return;
     }
     else_close := find_matching_brace(after_else, else_open);
     if else_close < 0 || trim(slice(after_else, else_close + 1, after_else.count - else_close - 1)).count {
         g.error = "malformed else block";
+        g.error_offset = after_else_offset;
         return;
     }
     print_to_builder(*g.body, "    else {\n");
-    if !emit_control_body(g, slice(after_else, else_open + 1, else_close - else_open - 1), parent) return;
+    if !emit_control_body(g, slice(after_else, else_open + 1, else_close - else_open - 1), parent, after_else_offset + else_open + 1) return;
     print_to_builder(*g.body, "    }\n");
 }
 
-emit_control_body :: (g: *Generator, source: string, parent: string) -> bool {
+emit_control_body :: (g: *Generator, source: string, parent: string, source_offset: s64) -> bool {
     parsed := XML.parse(source);
     if parsed.error.count {
-        g.error = tprint("XML in Jai control block at byte %: %", parsed.error_offset, parsed.error);
+        g.error = tprint("XML in Jai control block: %", parsed.error);
+        g.error_offset = source_offset + parsed.error_offset;
         return false;
     }
+    offset_nodes(parsed.roots, source_offset);
     for parsed.roots {
         if it.kind == .TEXT {
             append(*g.body, it.text);

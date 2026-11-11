@@ -11,12 +11,14 @@ XML_Node_Kind :: enum u8 {
 XML_Attribute :: struct {
     name: string;
     value: string;
+    offset: s64;
 }
 
 XML_Node :: struct {
     kind: XML_Node_Kind;
     name: string;
     text: string;
+    offset: s64;
     attributes: [..] XML_Attribute;
     children: [..] *XML_Node;
     self_closing: bool;
@@ -130,6 +132,11 @@ space :: (c: u8) -> bool #no_context {
     return c == #char " " || c == #char "\t" || c == #char "\r" || c == #char "\n";
 }
 
+has_hole :: (text: string) -> bool #no_context {
+    for c: text if c == #char "{" return true;
+    return false;
+}
+
 name_byte :: (c: u8) -> bool #no_context {
     return (c >= #char "a" && c <= #char "z") || (c >= #char "A" && c <= #char "Z") ||
         (c >= #char "0" && c <= #char "9") || c == #char "_" || c == #char "-" || c == #char ":" || c == #char ".";
@@ -210,6 +217,59 @@ find_hole_end :: (source: string, open: s64) -> s64 #no_context {
     return -1;
 }
 
+// Finds the closing attribute quote. Text outside a `{ ... }` hole ends at the
+// quote immediately; inside a hole, quotes are Jai strings and braces nest.
+find_attribute_value_end :: (source: string, start: s64, quote: u8) -> s64 #no_context {
+    depth: s64;
+    jai_quote: u8;
+    escaped := false;
+    line_comment := false;
+    block_comment := false;
+    i := start;
+    while i < source.count {
+        c := source[i];
+        next := ifx i + 1 < source.count then source[i + 1] else 0;
+
+        if depth == 0 {
+            if c == quote return i;
+            if c == #char "{" depth = 1;
+            i += 1;
+            continue;
+        }
+
+        if line_comment {
+            if c == #char "\n" line_comment = false;
+            i += 1;
+        } else if block_comment {
+            if c == #char "*" && next == #char "/" {
+                block_comment = false;
+                i += 2;
+            } else i += 1;
+        } else if jai_quote != 0 {
+            if escaped escaped = false;
+            else if c == #char "\\" escaped = true;
+            else if c == jai_quote jai_quote = 0;
+            i += 1;
+        } else if c == #char "\"" {
+            jai_quote = c;
+            i += 1;
+        } else if c == #char "/" && next == #char "/" {
+            line_comment = true;
+            i += 2;
+        } else if c == #char "/" && next == #char "*" {
+            block_comment = true;
+            i += 2;
+        } else if c == #char "{" {
+            depth += 1;
+            i += 1;
+        } else if c == #char "}" {
+            depth -= 1;
+            i += 1;
+        } else i += 1;
+    }
+    return -1;
+}
+
 parse_hole :: (p: *Parser) -> *XML_Node {
     open := p.at;
     close := find_hole_end(p.source, open);
@@ -220,6 +280,7 @@ parse_hole :: (p: *Parser) -> *XML_Node {
 
     result := New(XML_Node);
     result.kind = .JAI_HOLE;
+    result.offset = open;
     result.text = slice(p.source, open + 1, close - open - 1);
     p.at = close + 1;
     return result;
@@ -247,6 +308,7 @@ parse_element :: (p: *Parser) -> *XML_Node {
     result := New(XML_Node);
     result.kind = .ELEMENT;
     result.name = name;
+    result.offset = opening;
 
     while p.at < p.source.count {
         skip_space(p);
@@ -261,6 +323,7 @@ parse_element :: (p: *Parser) -> *XML_Node {
             return result;
         }
 
+        attribute_start := p.at;
         attribute_name := read_name(p);
         if attribute_name.count == 0 {
             fail(p, tprint("expected an attribute or `>` in <%>", name));
@@ -273,22 +336,42 @@ parse_element :: (p: *Parser) -> *XML_Node {
         }
         p.at += 1;
         skip_space(p);
-        if p.at >= p.source.count || (p.source[p.at] != #char "\"" && p.source[p.at] != #char "'") {
-            fail(p, tprint("attribute `%` must have a quoted value", attribute_name));
+        if p.at >= p.source.count {
+            fail(p, tprint("attribute `%` is missing a value", attribute_name));
             return result;
         }
 
-        quote := p.source[p.at];
-        p.at += 1;
-        value_start := p.at;
-        while p.at < p.source.count && p.source[p.at] != quote p.at += 1;
-        if p.at >= p.source.count {
-            fail(p, tprint("unclosed value for attribute `%`", attribute_name));
-            return result;
+        // Accept both class="{expr}" and class={expr}. A hole may contain
+        // quotes (including nested quotes inside Jai strings), so quoted values
+        // are scanned brace-aware instead of stopping at the first quote.
+        value: string;
+        if p.source[p.at] == #char "{" {
+            close := find_hole_end(p.source, p.at);
+            if close < 0 {
+                fail(p, tprint("unclosed Jai hole in attribute `%`", attribute_name));
+                return result;
+            }
+            value = slice(p.source, p.at, close - p.at + 1);
+            p.at = close + 1;
+        } else {
+            if p.source[p.at] != #char "\"" && p.source[p.at] != #char "'" {
+                fail(p, tprint("attribute `%` must have a quoted value or a {hole}", attribute_name));
+                return result;
+            }
+
+            quote := p.source[p.at];
+            p.at += 1;
+            value_start := p.at;
+            value_end := find_attribute_value_end(p.source, value_start, quote);
+            if value_end < 0 {
+                fail(p, tprint("unclosed value for attribute `%`", attribute_name));
+                return result;
+            }
+            raw := slice(p.source, value_start, value_end - value_start);
+            value = ifx has_hole(raw) then raw else decode_entities(p, raw);
+            p.at = value_end + 1;
         }
-        value := decode_entities(p, slice(p.source, value_start, p.at - value_start));
-        p.at += 1;
-        array_add(*result.attributes, .{ name = attribute_name, value = value });
+        array_add(*result.attributes, .{ name = attribute_name, value = value, offset = attribute_start });
     }
 
     p.at = opening;
@@ -338,6 +421,7 @@ parse_children :: (p: *Parser, expected_close: string) -> [..] *XML_Node {
         }
         child := New(XML_Node);
         child.kind = .TEXT;
+        child.offset = start;
         child.text = decode_entities(p, slice(p.source, start, p.at - start));
         array_add(*children, child);
     }

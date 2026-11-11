@@ -31,8 +31,19 @@ js_dom_get_attribute :: (element: DOM_Node, name: *u8, name_length: s64, output:
 js_dom_remove_attribute :: (element: DOM_Node, name: *u8, name_length: s64) -> s32 #foreign;
 js_dom_set_style :: (element: DOM_Node, name: *u8, name_length: s64, value: *u8, value_length: s64) #foreign;
 js_dom_add_event_listener :: (element: DOM_Node, event_name: *u8, event_name_length: s64, callback: DOM_Callback, data: *void) #foreign;
-js_dom_add_window_event_listener :: (event_name: *u8, event_name_length: s64, callback: DOM_Event_Handler, data: *void) #foreign;
+js_dom_add_window_event_listener :: (event_name: *u8, event_name_length: s64, callback: DOM_Callback, data: *void) #foreign;
 js_dom_clear :: (element: DOM_Node) #foreign;
+
+// Current-event access. Only valid while an event handler is running.
+js_event_prevent_default :: () #foreign;
+js_event_key_length :: () -> s64 #foreign;
+js_event_key_read :: (output: *u8, capacity: s64) -> s64 #foreign;
+
+// localStorage. Missing keys report -1 from the length probe.
+js_storage_length :: (key: *u8, key_length: s64) -> s64 #foreign;
+js_storage_get :: (key: *u8, key_length: s64, output: *u8, capacity: s64) -> s64 #foreign;
+js_storage_set :: (key: *u8, key_length: s64, value: *u8, value_length: s64) -> s32 #foreign;
+js_storage_remove :: (key: *u8, key_length: s64) #foreign;
 
 // URL / history bridge. Lets the app read and change the address bar without a
 // page reload, which is what SPA routing needs.
@@ -126,7 +137,7 @@ dom_on :: (element: DOM_Node, event_name: string, callback: DOM_Callback, data: 
 }
 
 // Window-level events such as "popstate" for SPA back/forward routing.
-dom_on_window :: (event_name: string, callback: DOM_Event_Handler, data: *void = null) #no_context {
+dom_on_window :: (event_name: string, callback: DOM_Callback, data: *void = null) #no_context {
     js_dom_add_window_event_listener(event_name.data, event_name.count, callback, data);
 }
 
@@ -270,4 +281,46 @@ dom_content :: inline (parent: DOM_Node, content: $T) #expand {
     #if T == DOM_Node dom_insert(parent, content);
     else #if T == string dom_text(parent, content);
     else dom_text(parent, tprint("%", content));
+}
+
+// Calls event.preventDefault() on the event being handled (form submit, link
+// click, ...). Does nothing outside an event handler.
+dom_event_prevent_default :: () #no_context {
+    js_event_prevent_default();
+}
+
+// `event.key` of the keyboard event being handled. `ok` is false when the
+// current event has no key. Context-allocated; the caller frees it.
+dom_read_event_key :: () -> (value: string, ok: bool) {
+    length := js_event_key_length();
+    if length < 0 return "", false;
+    if length == 0 return "", true;
+
+    builder: String_Builder;
+    space := ensure_contiguous_space_and_return_available_range(*builder, length);
+    js_event_key_read(space.data, length);
+    advance_through_ensured_space(*builder, length);
+    return builder_to_string(*builder), true;
+}
+
+// localStorage. `storage_set` returns false when the browser refuses (quota,
+// private mode). `storage_read` is context-allocated; the caller frees it.
+storage_set :: (key: string, value: string) -> bool #no_context {
+    return js_storage_set(key.data, key.count, value.data, value.count) != 0;
+}
+
+storage_remove :: (key: string) #no_context {
+    js_storage_remove(key.data, key.count);
+}
+
+storage_read :: (key: string) -> (value: string, ok: bool) {
+    length := js_storage_length(key.data, key.count);
+    if length < 0 return "", false;
+    if length == 0 return "", true;
+
+    builder: String_Builder;
+    space := ensure_contiguous_space_and_return_available_range(*builder, length);
+    js_storage_get(key.data, key.count, space.data, length);
+    advance_through_ensured_space(*builder, length);
+    return builder_to_string(*builder), true;
 }

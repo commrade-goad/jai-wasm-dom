@@ -1,7 +1,9 @@
 #import "Basic";
 #import "String";
 #import "Dom";
+#import "Async";
 #load "context.jai";
+#load "selftest.jai";
 
 View :: enum {
     COUNTER;
@@ -34,6 +36,13 @@ current_filter: Todo_Filter = .ALL;
 jai_dom_event_dispatch :: (callback: DOM_Callback, element: DOM_Node, data: *void) #c_call #no_context {
     with_wasm_context(#code {
         callback(data);
+    });
+}
+
+#program_export "jai_async_dispatch"
+jai_async_dispatch :: (callback: Async_Callback, handle: Async_Handle, event: s32, data: *void) #c_call #no_context {
+    with_wasm_context(#code {
+        callback(handle, cast(Async_Event) event, data);
     });
 }
 
@@ -261,5 +270,8 @@ app_init :: () #c_call #no_context {
         if nav_todos != DOM_NULL dom_on(nav_todos, "click", nav_todos_clicked);
 
         render_view();
+
+        selftest_flag, run_selftest := dom_read_param("selftest");
+        if run_selftest async_selftest();
     });
 }

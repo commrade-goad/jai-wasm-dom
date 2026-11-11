@@ -1,196 +1,15 @@
-let memory;
-let heapEnd = 0n;
-const allocations = new Map();
-const freeBlocks = [];
-const PAGE_SIZE = 64n * 1024n;
-const ALIGNMENT = 16n;
-const decoder = new TextDecoder();
-const encoder = new TextEncoder();
+import { createRuntime } from "./runtime.js";
+
+const rt = createRuntime();
+const { offset, view, stringAt, writeStringResult, writeBytesResult, encoder } = rt;
 const domNodes = new Map();
 const domNodeIds = new WeakMap();
 let nextDomId = 1;
-
-function offset(value) {
-    const number = Number(value);
-    if (!Number.isSafeInteger(number) || number < 0) throw new RangeError("WASM memory offset out of range");
-    return number;
-}
-
-function ptr(value) {
-    return typeof value === "bigint" ? value : BigInt(value);
-}
-
-function malloc(size) {
-    const requested = ptr(size);
-    if (requested <= 0n) return 0n;
-    const bytes = (requested + ALIGNMENT - 1n) & ~(ALIGNMENT - 1n);
-
-    const reusable = freeBlocks.findIndex(block => block.size >= bytes);
-    if (reusable >= 0) {
-        const block = freeBlocks[reusable];
-        const result = block.start;
-        block.start += bytes;
-        block.size -= bytes;
-        if (block.size === 0n) freeBlocks.splice(reusable, 1);
-        allocations.set(result, bytes);
-        return result;
-    }
-
-    const start = heapEnd || ptr(memory.buffer.byteLength);
-    const pages = (bytes + PAGE_SIZE - 1n) / PAGE_SIZE;
-    memory.grow(pages);
-    heapEnd = start + pages * PAGE_SIZE;
-    const unused = pages * PAGE_SIZE - bytes;
-    if (unused) freeBlocks.push({ start: start + bytes, size: unused });
-    allocations.set(start, bytes);
-    return start;
-}
-
-function free(pointer) {
-    const start = ptr(pointer);
-    const size = allocations.get(start);
-    if (start === 0n || size === undefined) return;
-    allocations.delete(start);
-    freeBlocks.push({ start, size });
-    freeBlocks.sort((a, b) => a.start < b.start ? -1 : a.start > b.start ? 1 : 0);
-    for (let i = 1; i < freeBlocks.length;) {
-        const before = freeBlocks[i - 1];
-        const current = freeBlocks[i];
-        if (before.start + before.size === current.start) {
-            before.size += current.size;
-            freeBlocks.splice(i, 1);
-        } else i++;
-    }
-}
-
-function realloc(pointer, newSize) {
-    const oldPointer = ptr(pointer);
-    const size = ptr(newSize);
-    if (oldPointer === 0n) return malloc(size);
-    if (size === 0n) {
-        free(oldPointer);
-        return 0n;
-    }
-    const oldSize = allocations.get(oldPointer);
-    if (oldSize === undefined) throw new Error("realloc received an unknown pointer");
-    const alignedSize = (size + ALIGNMENT - 1n) & ~(ALIGNMENT - 1n);
-    if (alignedSize <= oldSize) return oldPointer;
-    const replacement = malloc(size);
-    const copySize = offset(oldSize < size ? oldSize : size);
-    new Uint8Array(memory.buffer).copyWithin(offset(replacement), offset(oldPointer), offset(oldPointer) + copySize);
-    free(oldPointer);
-    return replacement;
-}
-
-function view(pointer, length) {
-    const start = offset(pointer);
-    const size = offset(length);
-    if (start + size > memory.buffer.byteLength) throw new RangeError("WASM memory access out of bounds");
-    return new Uint8Array(memory.buffer, start, size);
-}
-
-function stringAt(pointer, length) {
-    return decoder.decode(view(pointer, length));
-}
-
-function writeStringResult(value, output, capacity) {
-    if (value === null || value === undefined) return -1n;
-    const bytes = encoder.encode(String(value));
-    const available = offset(capacity);
-    if (available < bytes.length) return BigInt(bytes.length);
-    view(output, bytes.length).set(bytes);
-    return BigInt(bytes.length);
-}
 
 function commitUrl(url, replace) {
     const target = url.pathname + url.search + url.hash;
     if (replace) history.replaceState(null, "", target);
     else history.pushState(null, "", target);
-}
-
-function cStringLength(pointer) {
-    const start = offset(pointer);
-    const bytes = new Uint8Array(memory.buffer);
-    let end = start;
-    while (end < bytes.length && bytes[end] !== 0) end++;
-    if (end === bytes.length) throw new RangeError("Unterminated C string in WASM memory");
-    return end - start;
-}
-
-function cString(pointer) {
-    return stringAt(pointer, cStringLength(pointer));
-}
-
-function memoryCopy(destination, source, length) {
-    const dst = offset(destination);
-    const src = offset(source);
-    const count = offset(length);
-    new Uint8Array(memory.buffer).copyWithin(dst, src, src + count);
-    return ptr(destination);
-}
-
-function memorySet(destination, value, length) {
-    const bytes = view(destination, length);
-    bytes.fill(Number(value) & 0xff);
-    return ptr(destination);
-}
-
-function compareBytes(left, right, length) {
-    const a = view(left, length);
-    const b = view(right, length);
-    for (let i = 0; i < a.length; i++) {
-        if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
-    }
-    return 0;
-}
-
-function compareStrings(left, right, limit = null) {
-    const a = offset(left);
-    const b = offset(right);
-    const bytes = new Uint8Array(memory.buffer);
-    let i = 0;
-    while (limit === null || i < limit) {
-        const x = bytes[a + i] ?? 0;
-        const y = bytes[b + i] ?? 0;
-        if (x !== y) return x < y ? -1 : 1;
-        if (x === 0) return 0;
-        i++;
-    }
-    return 0;
-}
-
-function copyCString(destination, source, limit = null) {
-    const dst = offset(destination);
-    const src = offset(source);
-    const bytes = new Uint8Array(memory.buffer);
-    let i = 0;
-    while ((limit === null || i < limit) && bytes[src + i] !== 0) {
-        bytes[dst + i] = bytes[src + i];
-        i++;
-    }
-    if (limit === null) bytes[dst + i] = 0;
-    else while (i < limit) bytes[dst + i++] = 0;
-    return ptr(destination);
-}
-
-function boundedCStringLength(pointer, maximum) {
-    const start = offset(pointer);
-    const limit = offset(maximum);
-    const bytes = new Uint8Array(memory.buffer);
-    let end = 0;
-    while (end < limit && bytes[start + end] !== 0) end++;
-    return end;
-}
-
-function findCStringCharacter(pointer, character) {
-    const start = offset(pointer);
-    const target = Number(character) & 0xff;
-    const bytes = new Uint8Array(memory.buffer);
-    for (let i = 0; start + i < bytes.length; i++) {
-        if (bytes[start + i] === target) return ptr(start + i);
-        if (bytes[start + i] === 0) break;
-    }
-    return 0n;
 }
 
 function node(id) {
@@ -208,109 +27,332 @@ function registerNode(element) {
     return id;
 }
 
+// ---------------------------------------------------------------------------
+// Async host: fetch, WebSocket, timers, frames, workers.
+// Every operation is an entry in `asyncHandles`, addressed by an s32 handle.
+// Results stay here until Jai asks for them (length probe, then read).
+// ---------------------------------------------------------------------------
+
+// Keep this order in sync with Async_Event in modules/Async/module.jai.
+const EVENT = {
+    HTTP_DONE: 0, HTTP_ERROR: 1, WS_OPEN: 2, WS_MESSAGE: 3, WS_CLOSE: 4,
+    WS_ERROR: 5, TIMER: 6, FRAME: 7, WORKER_MESSAGE: 8, WORKER_ERROR: 9,
+};
+
+const asyncHandles = new Map();
+let nextAsyncId = 1;
+let currentEvent = null;
+
+function newAsync(entry) {
+    const id = nextAsyncId++;
+    asyncHandles.set(id, entry);
+    return id;
+}
+
+function asyncEntry(id, kind) {
+    const entry = asyncHandles.get(id);
+    return entry && (kind === undefined || entry.kind === kind) ? entry : null;
+}
+
+// Callbacks never fire for a handle that was cancelled or freed.
+function asyncDispatch(callback, id, event, data) {
+    if (!asyncHandles.has(id)) return;
+    try {
+        api.jai_async_dispatch(callback, id, event, data);
+    } catch (error) {
+        console.error("Jai async callback failed:", error);
+    }
+}
+
+function parseHeaderBlock(text) {
+    const headers = new Headers();
+    for (const line of text.split("\n")) {
+        const colon = line.indexOf(":");
+        if (colon <= 0) continue;
+        headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+    }
+    return headers;
+}
+
+function toBytes(data) {
+    if (typeof data === "string") return { binary: false, bytes: encoder.encode(data) };
+    if (data instanceof ArrayBuffer) return { binary: true, bytes: new Uint8Array(data) };
+    if (ArrayBuffer.isView(data)) return { binary: true, bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+    return { binary: false, bytes: encoder.encode(JSON.stringify(data)) };
+}
+
+function errorText(error) {
+    return encoder.encode(String((error && error.message) || error || "unknown error"));
+}
+
+const asyncImports = {
+    js_http_fetch(url, urlLength, method, methodLength, headers, headersLength, body, bodyLength, timeoutMs, callback, data) {
+        const controller = new AbortController();
+        const entry = { kind: "http", status: 0, headers: null, body: null, error: null, timedOut: false };
+        const id = newAsync(entry);
+
+        const init = { method: stringAt(method, methodLength) || "GET", signal: controller.signal };
+        const headerText = stringAt(headers, headersLength);
+        if (headerText) init.headers = parseHeaderBlock(headerText);
+        // Copy now: WASM memory may move before the request is sent.
+        if (offset(bodyLength) > 0) init.body = view(body, bodyLength).slice();
+        entry.controller = controller;
+
+        let timer = 0;
+        if (timeoutMs > 0) {
+            timer = setTimeout(() => { entry.timedOut = true; controller.abort(); }, timeoutMs);
+        }
+
+        fetch(stringAt(url, urlLength), init)
+            .then(async response => {
+                entry.status = response.status;
+                entry.headers = response.headers;
+                entry.body = new Uint8Array(await response.arrayBuffer());
+                return EVENT.HTTP_DONE;
+            })
+            .catch(error => {
+                entry.error = entry.timedOut ? encoder.encode("timeout") : errorText(error);
+                return EVENT.HTTP_ERROR;
+            })
+            .then(event => {
+                clearTimeout(timer);
+                asyncDispatch(callback, id, event, data);
+            });
+        return id;
+    },
+    js_http_status(id) {
+        const entry = asyncEntry(id, "http");
+        return entry ? entry.status : 0;
+    },
+    js_http_body_length(id) {
+        const entry = asyncEntry(id, "http");
+        return entry && entry.body ? BigInt(entry.body.length) : -1n;
+    },
+    js_http_body_read(id, output, capacity) {
+        const entry = asyncEntry(id, "http");
+        return writeBytesResult(entry && entry.body, output, capacity);
+    },
+    js_http_header_length(id, name, nameLength) {
+        const entry = asyncEntry(id, "http");
+        const value = entry && entry.headers ? entry.headers.get(stringAt(name, nameLength)) : null;
+        return value === null ? -1n : BigInt(encoder.encode(value).length);
+    },
+    js_http_header_read(id, name, nameLength, output, capacity) {
+        const entry = asyncEntry(id, "http");
+        const value = entry && entry.headers ? entry.headers.get(stringAt(name, nameLength)) : null;
+        return writeBytesResult(value === null ? null : encoder.encode(value), output, capacity);
+    },
+
+    js_ws_open(url, urlLength, protocols, protocolsLength, callback, data) {
+        const entry = { kind: "ws", socket: null, queue: [], closeCode: 0, error: null };
+        const id = newAsync(entry);
+        const list = stringAt(protocols, protocolsLength).split(",").map(p => p.trim()).filter(Boolean);
+        try {
+            const socket = list.length ? new WebSocket(stringAt(url, urlLength), list) : new WebSocket(stringAt(url, urlLength));
+            socket.binaryType = "arraybuffer";
+            entry.socket = socket;
+            socket.addEventListener("open", () => asyncDispatch(callback, id, EVENT.WS_OPEN, data));
+            socket.addEventListener("message", e => {
+                entry.queue.push(toBytes(e.data));
+                asyncDispatch(callback, id, EVENT.WS_MESSAGE, data);
+            });
+            socket.addEventListener("error", () => {
+                entry.error = encoder.encode("WebSocket error");
+                asyncDispatch(callback, id, EVENT.WS_ERROR, data);
+            });
+            socket.addEventListener("close", e => {
+                entry.closeCode = e.code;
+                asyncDispatch(callback, id, EVENT.WS_CLOSE, data);
+            });
+        } catch (error) {
+            // Bad URL or protocol: report asynchronously, like a failed connect.
+            entry.error = errorText(error);
+            entry.closeCode = 1006;
+            setTimeout(() => {
+                asyncDispatch(callback, id, EVENT.WS_ERROR, data);
+                asyncDispatch(callback, id, EVENT.WS_CLOSE, data);
+            }, 0);
+        }
+        return id;
+    },
+    js_ws_send_text(id, text, length) {
+        const entry = asyncEntry(id, "ws");
+        if (!entry || !entry.socket || entry.socket.readyState !== 1) return 0;
+        entry.socket.send(stringAt(text, length));
+        return 1;
+    },
+    js_ws_send_binary(id, bytes, length) {
+        const entry = asyncEntry(id, "ws");
+        if (!entry || !entry.socket || entry.socket.readyState !== 1) return 0;
+        entry.socket.send(view(bytes, length).slice());
+        return 1;
+    },
+    js_ws_close(id, code, reason, reasonLength) {
+        const entry = asyncEntry(id, "ws");
+        if (!entry || !entry.socket) return;
+        try {
+            const text = stringAt(reason, reasonLength);
+            if (text) entry.socket.close(code, text);
+            else entry.socket.close(code);
+        } catch (error) {
+            console.error("WebSocket close failed:", error);
+        }
+    },
+    js_ws_ready_state(id) {
+        const entry = asyncEntry(id, "ws");
+        return entry && entry.socket ? entry.socket.readyState : 3;
+    },
+    js_ws_close_code(id) {
+        const entry = asyncEntry(id, "ws");
+        return entry ? entry.closeCode : 0;
+    },
+
+    js_timer_set(milliseconds, repeat, callback, data) {
+        const entry = { kind: "timer", native: 0, repeat: repeat !== 0 };
+        const id = newAsync(entry);
+        const fire = () => {
+            if (!entry.repeat) asyncHandles.delete(id);
+            else if (!asyncHandles.has(id)) return;
+            try {
+                api.jai_async_dispatch(callback, id, EVENT.TIMER, data);
+            } catch (error) {
+                console.error("Jai async callback failed:", error);
+            }
+        };
+        entry.native = entry.repeat ? setInterval(fire, milliseconds) : setTimeout(fire, milliseconds);
+        return id;
+    },
+    js_frame_request(callback, data) {
+        const entry = { kind: "frame", native: 0 };
+        const id = newAsync(entry);
+        entry.native = requestAnimationFrame(() => {
+            if (!asyncHandles.has(id)) return;
+            asyncDispatch(callback, id, EVENT.FRAME, data);
+            asyncHandles.delete(id);
+        });
+        return id;
+    },
+    js_now_ms() { return performance.now(); },
+
+    js_worker_spawn(url, urlLength, callback, data) {
+        const entry = { kind: "worker", worker: null, queue: [], error: null };
+        const id = newAsync(entry);
+        try {
+            // The worker body is a Jai wasm module; worker-glue.js just hosts it.
+            const wasmUrl = new URL(stringAt(url, urlLength), location.href).href;
+            const worker = new Worker(new URL("./worker-glue.js", import.meta.url), { type: "module", name: wasmUrl });
+            entry.worker = worker;
+            worker.onmessage = e => {
+                entry.queue.push(toBytes(e.data));
+                asyncDispatch(callback, id, EVENT.WORKER_MESSAGE, data);
+            };
+            worker.onerror = e => {
+                entry.error = errorText(e.message || "worker error");
+                asyncDispatch(callback, id, EVENT.WORKER_ERROR, data);
+            };
+        } catch (error) {
+            entry.error = errorText(error);
+            setTimeout(() => asyncDispatch(callback, id, EVENT.WORKER_ERROR, data), 0);
+        }
+        return id;
+    },
+    js_worker_post(id, bytes, length, binary) {
+        const entry = asyncEntry(id, "worker");
+        if (!entry || !entry.worker) return 0;
+        if (binary !== 0) {
+            const copy = view(bytes, length).slice();
+            entry.worker.postMessage(copy.buffer, [copy.buffer]);
+        } else {
+            entry.worker.postMessage(stringAt(bytes, length));
+        }
+        return 1;
+    },
+
+    // Message queue shared by WebSocket and Worker handles.
+    js_msg_length(id) {
+        const entry = asyncHandles.get(id);
+        return entry && entry.queue && entry.queue.length ? BigInt(entry.queue[0].bytes.length) : -1n;
+    },
+    js_msg_is_binary(id) {
+        const entry = asyncHandles.get(id);
+        return entry && entry.queue && entry.queue.length && entry.queue[0].binary ? 1 : 0;
+    },
+    js_msg_read(id, output, capacity) {
+        const entry = asyncHandles.get(id);
+        if (!entry || !entry.queue || !entry.queue.length) return -1n;
+        const message = entry.queue[0];
+        const result = writeBytesResult(message.bytes, output, capacity);
+        // Only pop when the caller's buffer was big enough.
+        if (offset(capacity) >= message.bytes.length) entry.queue.shift();
+        return result;
+    },
+
+    js_error_length(id) {
+        const entry = asyncHandles.get(id);
+        return entry && entry.error ? BigInt(entry.error.length) : -1n;
+    },
+    js_error_read(id, output, capacity) {
+        const entry = asyncHandles.get(id);
+        return writeBytesResult(entry && entry.error, output, capacity);
+    },
+
+    js_async_cancel(id) {
+        const entry = asyncHandles.get(id);
+        if (!entry) return;
+        asyncHandles.delete(id);
+        switch (entry.kind) {
+            case "http": entry.controller.abort(); break;
+            case "ws": if (entry.socket) { try { entry.socket.close(); } catch {} } break;
+            case "worker": if (entry.worker) entry.worker.terminate(); break;
+            case "timer": (entry.repeat ? clearInterval : clearTimeout)(entry.native); break;
+            case "frame": cancelAnimationFrame(entry.native); break;
+        }
+    },
+
+    // Current-event access: only valid while a DOM handler is running.
+    js_event_prevent_default() { if (currentEvent) currentEvent.preventDefault(); },
+    js_event_key_length() {
+        const key = currentEvent && currentEvent.key;
+        return typeof key === "string" ? BigInt(encoder.encode(key).length) : -1n;
+    },
+    js_event_key_read(output, capacity) {
+        const key = currentEvent && currentEvent.key;
+        return writeStringResult(typeof key === "string" ? key : null, output, capacity);
+    },
+
+    // localStorage. Failures (disabled storage, quota) read as "missing".
+    js_storage_length(key, keyLength) {
+        try {
+            const value = localStorage.getItem(stringAt(key, keyLength));
+            return value === null ? -1n : BigInt(encoder.encode(value).length);
+        } catch { return -1n; }
+    },
+    js_storage_get(key, keyLength, output, capacity) {
+        try {
+            return writeStringResult(localStorage.getItem(stringAt(key, keyLength)), output, capacity);
+        } catch { return -1n; }
+    },
+    js_storage_set(key, keyLength, value, valueLength) {
+        try {
+            localStorage.setItem(stringAt(key, keyLength), stringAt(value, valueLength));
+            return 1;
+        } catch { return 0; }
+    },
+    js_storage_remove(key, keyLength) {
+        try { localStorage.removeItem(stringAt(key, keyLength)); } catch {}
+    },
+};
+
+function withCurrentEvent(event, run) {
+    const previous = currentEvent;
+    currentEvent = event;
+    try { run(); } finally { currentEvent = previous; }
+}
+
 const imports = {
     env: {
-        abort() { throw new WebAssembly.RuntimeError("Jai called abort()"); },
-        malloc,
-        calloc(count, size) {
-            const total = ptr(count) * ptr(size);
-            if (total > 0xffffffffffffffffn) return 0n;
-            const result = malloc(total);
-            if (result !== 0n) memorySet(result, 0, total);
-            return result;
-        },
-        free,
-        realloc,
-        memcpy: memoryCopy,
-        memmove: memoryCopy,
-        memset: memorySet,
-        memchr(pointer, character, length) {
-            const start = offset(pointer);
-            const bytes = view(pointer, length);
-            const found = bytes.indexOf(Number(character) & 0xff);
-            return found < 0 ? 0n : ptr(start + found);
-        },
-        memcmp: compareBytes,
-        strlen(pointer) { return BigInt(cStringLength(pointer)); },
-        strnlen(pointer, maximum) { return BigInt(boundedCStringLength(pointer, maximum)); },
-        strcmp: compareStrings,
-        strncmp(left, right, length) { return compareStrings(left, right, offset(length)); },
-        strcpy(destination, source) { return copyCString(destination, source); },
-        strncpy(destination, source, length) { return copyCString(destination, source, offset(length)); },
-        strcat(destination, source) {
-            const end = ptr(destination) + BigInt(cStringLength(destination));
-            copyCString(end, source);
-            return ptr(destination);
-        },
-        strncat(destination, source, length) {
-            const end = ptr(destination) + BigInt(cStringLength(destination));
-            const count = boundedCStringLength(source, length);
-            memoryCopy(end, source, BigInt(count));
-            memorySet(end + BigInt(count), 0, 1);
-            return ptr(destination);
-        },
-        strchr: findCStringCharacter,
-        strrchr(pointer, character) {
-            const start = offset(pointer);
-            const target = Number(character) & 0xff;
-            const bytes = new Uint8Array(memory.buffer);
-            let found = target === 0 ? start + cStringLength(pointer) : -1;
-            for (let i = 0; start + i < bytes.length; i++) {
-                if (bytes[start + i] === target) found = start + i;
-                if (bytes[start + i] === 0) break;
-            }
-            return found < 0 ? 0n : ptr(found);
-        },
-        strstr(haystack, needle) {
-            const start = offset(haystack);
-            const textLength = cStringLength(haystack);
-            const needleLength = cStringLength(needle);
-            if (needleLength === 0) return ptr(haystack);
-            const text = view(haystack, textLength);
-            const sought = view(needle, needleLength);
-            for (let i = 0; i + needleLength <= textLength; i++) {
-                let matches = true;
-                for (let j = 0; j < needleLength; j++) {
-                    if (text[i + j] !== sought[j]) {
-                        matches = false;
-                        break;
-                    }
-                }
-                if (matches) return ptr(start + i);
-            }
-            return 0n;
-        },
-        strdup(source) {
-            const length = cStringLength(source);
-            const result = malloc(BigInt(length + 1));
-            copyCString(result, source);
-            return result;
-        },
-        strndup(source, maximum) {
-            const length = boundedCStringLength(source, maximum);
-            const result = malloc(BigInt(length + 1));
-            memoryCopy(result, source, BigInt(length));
-            memorySet(result + BigInt(length), 0, 1);
-            return result;
-        },
-        write(fd, buffer, length) {
-            const text = stringAt(buffer, length);
-            (fd === 2 ? console.error : console.log)(text);
-            return ptr(length);
-        },
-        puts(pointer) {
-            console.log(cString(pointer));
-            return 0;
-        },
-        putchar(character) {
-            console.log(String.fromCharCode(Number(character) & 0xff));
-            return Number(character) & 0xff;
-        },
-        exit(status) { throw new WebAssembly.RuntimeError(`Jai exited with status ${status}`); },
-        __stack_chk_fail() { throw new WebAssembly.RuntimeError("WASM stack corruption detected"); },
-        __assert_fail(assertion, file, line, functionName) {
-            throw new WebAssembly.RuntimeError(`${cString(file)}:${line}: assertion failed: ${cString(assertion)} in ${cString(functionName)}`);
-        },
+        ...asyncImports,
+        ...rt.libc,
         js_dom_find(selector, length) {
             const element = document.querySelector(stringAt(selector, length));
             return element ? registerNode(element) : 0;
@@ -374,11 +416,11 @@ const imports = {
         },
         js_dom_add_event_listener(id, eventName, eventNameLength, callbackIndex, data) {
             const event = stringAt(eventName, eventNameLength);
-            node(id).addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, id, data));
+            node(id).addEventListener(event, e => withCurrentEvent(e, () => api.jai_dom_event_dispatch(callbackIndex, id, data)));
         },
         js_dom_add_window_event_listener(eventName, eventNameLength, callbackIndex, data) {
             const event = stringAt(eventName, eventNameLength);
-            window.addEventListener(event, () => api.jai_dom_event_dispatch(callbackIndex, 0, data));
+            window.addEventListener(event, e => withCurrentEvent(e, () => api.jai_dom_event_dispatch(callbackIndex, 0, data)));
         },
         js_dom_clear(id) {
             const element = node(id);
@@ -456,8 +498,8 @@ const imports = {
 
 const { instance } = await WebAssembly.instantiateStreaming(fetch("./main.wasm"), imports);
 const api = instance.exports;
-memory = api.memory;
-if (!memory) throw new Error("main.wasm does not export memory");
+if (!api.memory) throw new Error("main.wasm does not export memory");
+rt.setMemory(api.memory);
 
 try {
     api.app_init();

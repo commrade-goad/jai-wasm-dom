@@ -5,6 +5,7 @@ const { offset, view, stringAt, writeStringResult, writeBytesResult, encoder } =
 const domNodes = new Map();
 const domNodeIds = new WeakMap();
 let nextDomId = 1;
+let api = null;   // exports of the running Jai program, set by start()
 
 function commitUrl(url, replace) {
     const target = url.pathname + url.search + url.hash;
@@ -496,13 +497,20 @@ const imports = {
     },
 };
 
-const { instance } = await WebAssembly.instantiateStreaming(fetch("./main.wasm"), imports);
-const api = instance.exports;
-if (!api.memory) throw new Error("main.wasm does not export memory");
-rt.setMemory(api.memory);
+// Loads a Jai program (built with Web_Build) and runs its `app_main`.
+//   <script type="module">
+//       import { start } from "../../web/glue.js";
+//       start("./main.wasm");
+//   </script>
+export async function start(wasmUrl = "./main.wasm") {
+    const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), imports);
+    api = instance.exports;
+    if (!api.memory) throw new Error(`${wasmUrl} does not export memory`);
+    rt.setMemory(api.memory);
 
-try {
-    api.app_init();
-} catch (error) {
-    console.error("Jai app_init failed:", error);
+    try {
+        api.app_init();
+    } catch (error) {
+        console.error("Jai app_main failed:", error);
+    }
 }

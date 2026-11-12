@@ -1,9 +1,6 @@
 #import "Basic";
 #import "String";
-#import "Dom";
-#import "Async";
-#load "context.jai";
-#load "selftest.jai";
+#import "Web";
 
 View :: enum {
     COUNTER;
@@ -31,20 +28,6 @@ todos: [..] Todo_Item;
 next_todo_id: s32;
 current_view: View = .COUNTER;
 current_filter: Todo_Filter = .ALL;
-
-#program_export "jai_dom_event_dispatch"
-jai_dom_event_dispatch :: (callback: DOM_Callback, element: DOM_Node, data: *void) #c_call #no_context {
-    with_wasm_context(#code {
-        callback(data);
-    });
-}
-
-#program_export "jai_async_dispatch"
-jai_async_dispatch :: (callback: Async_Callback, handle: Async_Handle, event: s32, data: *void) #c_call #no_context {
-    with_wasm_context(#code {
-        callback(handle, cast(Async_Event) event, data);
-    });
-}
 
 render_view :: () {
     view := dom_find("#view");
@@ -254,24 +237,21 @@ filter_done_clicked :: (data: *void) {
     render_view();
 }
 
-#program_export "app_init"
-app_init :: () #c_call #no_context {
-    with_wasm_context(#code {
-        main := dom_find("#main");
-        if main == DOM_NULL return;
+app_main :: () {
+    main := dom_find("#main");
+    if main == DOM_NULL return;
 
-        shell := AppShell();
-        dom_insert(main, shell);
+    shell := AppShell();
+    dom_insert(main, shell);
 
-        nav_counter := dom_find_in(shell, "#nav-counter");
-        if nav_counter != DOM_NULL dom_on(nav_counter, "click", nav_counter_clicked);
+    nav_counter := dom_find_in(shell, "#nav-counter");
+    if nav_counter != DOM_NULL dom_on(nav_counter, "click", nav_counter_clicked);
 
-        nav_todos := dom_find_in(shell, "#nav-todos");
-        if nav_todos != DOM_NULL dom_on(nav_todos, "click", nav_todos_clicked);
+    nav_todos := dom_find_in(shell, "#nav-todos");
+    if nav_todos != DOM_NULL dom_on(nav_todos, "click", nav_todos_clicked);
 
-        render_view();
-
-        selftest_flag, run_selftest := dom_read_param("selftest");
-        if run_selftest async_selftest();
-    });
+    render_view();
 }
+
+#program_export "app_init"
+app_init :: () #c_call #no_context { with_wasm_context(#code { app_main(); }); }

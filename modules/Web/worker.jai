@@ -2,19 +2,19 @@
 
 // Worker side of the Async module: write the body of a Web Worker in Jai.
 //
-// A Jai worker is its own wasm module. `worker-glue.js` (generic, no app code)
-// instantiates it inside a module Worker and forwards messages. The program
-// needs two exports; see echo_worker.jai for a complete example:
+// A Jai worker is its own wasm module. `web/worker-glue.js` (generic, no app
+// code) instantiates it inside a module Worker and forwards messages. A worker
+// program looks like this (full example: examples/selftest/echo_worker.jai):
+//
+//     #import "Web";
+//
+//     worker_main :: () { worker_on_message(on_message); }   // runs once at start
+//     on_message :: (message: string, is_binary: bool) { worker_reply_text(message); }
 //
 //     #program_export "worker_init"
-//     worker_init :: () #c_call #no_context { with_wasm_context(#code { worker_on_message(handler); }); }
+//     worker_init :: () #c_call #no_context { with_wasm_context(#code { worker_main(); }); }
 //
-//     #program_export "jai_worker_dispatch"
-//     jai_worker_dispatch :: (data: *u8, length: s64, is_binary: s32) #c_call #no_context {
-//         with_wasm_context(#code { worker_dispatch(data, length, is_binary != 0); });
-//     }
-//
-// The page starts it with `worker_spawn("echo-worker.wasm", callback)` (Async).
+// The page starts it with `worker_spawn("./my-worker.wasm", callback)`.
 
 Worker_Callback :: #type (message: string, is_binary: bool);
 
@@ -26,6 +26,7 @@ js_worker_close :: () #foreign;
 // `message` points at a host buffer that is only valid during the call; copy it
 // (copy_string) if you need to keep it.
 worker_on_message :: (callback: Worker_Callback) {
+    worker_keep_exports();
     message_handler = callback;
 }
 
@@ -55,3 +56,13 @@ worker_dispatch :: (data: *u8, length: s64, is_binary: bool) {
 #scope_file
 
 message_handler: Worker_Callback;
+
+// Keeps the dispatcher export alive; reached through the worker callbacks.
+worker_keep_exports :: () #no_context {
+    a := jai_worker_dispatch;
+}
+
+#program_export "jai_worker_dispatch"
+jai_worker_dispatch :: (data: *u8, length: s64, is_binary: s32) #c_call #no_context {
+    with_wasm_context(#code { worker_dispatch(data, length, is_binary != 0); });
+}

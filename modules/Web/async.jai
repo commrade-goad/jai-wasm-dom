@@ -17,7 +17,7 @@
 Async_Handle :: #type,distinct s32;
 ASYNC_NULL :: cast(Async_Handle) 0;
 
-// Keep this order in sync with `EVENT` in glue.js.
+// Keep this order in sync with `EVENT` in web/glue.js.
 Async_Event :: enum s32 {
     HTTP_DONE;
     HTTP_ERROR;
@@ -29,6 +29,8 @@ Async_Event :: enum s32 {
     FRAME;
     WORKER_MESSAGE;
     WORKER_ERROR;
+    CUSTOM;        // your own JS called host.handle(...).emit(); read it with custom_read_message
+    CUSTOM_ERROR;  // host.handle(...).fail(); read it with async_read_error
 }
 
 Async_Callback :: #type (handle: Async_Handle, event: Async_Event, data: *void);
@@ -261,6 +263,25 @@ worker_read_message :: (handle: Async_Handle) -> (data: string, is_binary: bool,
 }
 
 worker_terminate :: (handle: Async_Handle) {
+    js_async_cancel(handle);
+}
+
+// ---------------------------------------------------------------------------
+// Custom host code (your own JavaScript)
+// ---------------------------------------------------------------------------
+//
+// Declare your own foreign procedures and implement them in JS with
+// start("./main.wasm", { env: host => ({ ... }) }) (see web/glue.js and
+// examples/custom-js). A function that returns an Async_Handle gives Jai
+// either a value to read once (host.value) or a stream of CUSTOM events
+// (host.handle). Read each message with custom_read_message, errors with
+// async_read_error, and release the handle with custom_free.
+
+custom_read_message :: (handle: Async_Handle) -> (data: string, is_binary: bool, ok: bool) {
+    return msg_read(handle);
+}
+
+custom_free :: (handle: Async_Handle) {
     js_async_cancel(handle);
 }
 

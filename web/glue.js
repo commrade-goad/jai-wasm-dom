@@ -34,10 +34,11 @@ function registerNode(element) {
 // Results stay here until Jai asks for them (length probe, then read).
 // ---------------------------------------------------------------------------
 
-// Keep this order in sync with Async_Event in modules/Async/module.jai.
+// Keep this order in sync with Async_Event in modules/Web/async.jai.
 const EVENT = {
     HTTP_DONE: 0, HTTP_ERROR: 1, WS_OPEN: 2, WS_MESSAGE: 3, WS_CLOSE: 4,
     WS_ERROR: 5, TIMER: 6, FRAME: 7, WORKER_MESSAGE: 8, WORKER_ERROR: 9,
+    CUSTOM: 10, CUSTOM_ERROR: 11,
 };
 
 const asyncHandles = new Map();
@@ -307,6 +308,7 @@ const asyncImports = {
             case "worker": if (entry.worker) entry.worker.terminate(); break;
             case "timer": (entry.repeat ? clearInterval : clearTimeout)(entry.native); break;
             case "frame": cancelAnimationFrame(entry.native); break;
+            case "custom": if (entry.onClose) { try { entry.onClose(); } catch (e) { console.error(e); } } break;
         }
     },
 
@@ -497,12 +499,75 @@ const imports = {
     },
 };
 
-// Loads a Jai program (built with Web_Build) and runs its `app_main`.
+// ---------------------------------------------------------------------------
+// Extension point: your own JavaScript, callable from Jai.
+//
+//   start("./main.wasm", { env: host => ({ my_fn(ptr, len) { ... } }) })
+//
+// Declare `my_fn :: (...) #foreign;` in Jai and call it like any procedure.
+// WASM is 64-bit here: pointers and s64 arrive as BigInt, s32 as Number, and
+// the same goes for what you return (return BigInt for s64/pointers).
+// `env` may be an object or a function receiving `host`. Names that clash with
+// the built-in host functions are rejected.
+// ---------------------------------------------------------------------------
+const host = {
+    // Reads from wasm memory (call these inside your host function, not later).
+    string: (ptr, length) => stringAt(ptr, length),
+    bytes: (ptr, length) => view(ptr, length).slice(),   // a copy, safe to keep
+    // Jai DOM handle <-> element.
+    dom: id => node(Number(id)),
+    domId: element => registerNode(element),
+    // The running program's exports (undefined before start() finishes).
+    get exports() { return api; },
+
+    // A value Jai reads right away. Return the id from your function, declare
+    // it `-> Async_Handle` in Jai, then custom_read_message(handle) and
+    // custom_free(handle). `payload` is a string, bytes, or anything JSON-able.
+    value(payload) {
+        const id = newAsync({ kind: "custom", queue: [toBytes(payload)], error: null });
+        return id;
+    },
+
+    // A stream of events for a Jai callback. Return `.id` from your function
+    // (declared `-> Async_Handle`, taking `callback: Async_Callback, data: *void`).
+    //   const h = host.handle(callback, data);
+    //   window.addEventListener("resize", () => h.emit({ w: innerWidth }));
+    //   return h.id;
+    // emit() -> CUSTOM + custom_read_message; fail() -> CUSTOM_ERROR + async_read_error.
+    // custom_free() from Jai closes it and runs onClose, where you remove listeners.
+    handle(callback, data) {
+        const entry = { kind: "custom", queue: [], error: null, onClose: null };
+        const id = newAsync(entry);
+        return {
+            id,
+            emit(payload) {
+                entry.queue.push(toBytes(payload));
+                asyncDispatch(callback, id, EVENT.CUSTOM, data);
+            },
+            fail(error) {
+                entry.error = errorText(error);
+                asyncDispatch(callback, id, EVENT.CUSTOM_ERROR, data);
+            },
+            set onClose(fn) { entry.onClose = fn; },
+        };
+    },
+};
+
+function mergeEnv(extra) {
+    const added = typeof extra === "function" ? extra(host) : extra;
+    for (const name of Object.keys(added || {})) {
+        if (name in imports.env) throw new Error(`env.${name} clashes with a built-in host function`);
+        imports.env[name] = added[name];
+    }
+}
+
+// Loads a Jai program (built with Web_Build) and runs its `app_init`.
 //   <script type="module">
 //       import { start } from "../../web/glue.js";
-//       start("./main.wasm");
+//       start("./main.wasm", { env: host => ({ ... }) });   // env is optional
 //   </script>
-export async function start(wasmUrl = "./main.wasm") {
+export async function start(wasmUrl = "./main.wasm", options = {}) {
+    if (options.env) mergeEnv(options.env);
     const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmUrl), imports);
     api = instance.exports;
     if (!api.memory) throw new Error(`${wasmUrl} does not export memory`);

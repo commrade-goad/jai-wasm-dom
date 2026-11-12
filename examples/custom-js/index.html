@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+    <head><meta charset="utf-8"><title>custom-js</title></head>
+    <body>
+        <h1>custom-js</h1>
+        <p id="size"></p>
+        <button id="copy">Copy "hello from Jai"</button> <span id="status"></span>
+        <script type="module">
+            import { start } from "../../web/glue.js";
+            import host from "./host.js";
+            start("./main.wasm", { env: host });
+        </script>
+    </body>
+</html>

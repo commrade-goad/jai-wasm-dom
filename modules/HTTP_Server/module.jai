@@ -26,7 +26,15 @@ delete :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.
 any    :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.ANY,    cb=cb, path=normalize_path(path)}); }
 
 
-
+status_code_to_string :: inline (status_code: u16) -> string {
+    if status_code == {
+        case 200; return "OK";
+        case 404; return "Not Found";
+        case 403; return "Forbidden";
+        case    ; return "Not Known";
+        // ...
+    }
+}
 
 
 
@@ -34,11 +42,9 @@ send_html     :: #bake_arguments send_response(content_type="text/html");
 send_text     :: #bake_arguments send_response(content_type="text/plain");
 send_json     :: #bake_arguments send_response(content_type="application/json");
 send_response :: (request: *Request, content: string, status_code: u16 = 200, content_type: string = "text/plain", content_encoding: string = "") {
-  // todo: status_code 404 is responding with "404 OK" lol
   content_encoding_header := ifx content_encoding then tprint("\r\nContent-Encoding: %", content_encoding) else "";
-  // a charset parameter breaks binary types: browsers refuse "application/wasm; charset=UTF-8"
   charset := ifx begins_with(content_type, "text/") || content_type == "application/json" then "; charset=UTF-8" else "";
-  http_response := tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %%%\r\n\r\n%", status_code, content.count, content_type, charset, content_encoding_header, content);
+  http_response := tprint("HTTP/1.1 % %\r\nContent-Length: %\r\nContent-Type: %%%\r\n\r\n%", status_code, status_code_to_string(status_code), content.count, content_type, charset, content_encoding_header, content);
 
   request.response_sent = true;
 
@@ -200,10 +206,12 @@ static :: (folder: string) {
   the_static_folder_to_serve = folder;
 
   get("*", (request: *Request) {;
-
     // if the path ends wht a / then we consider it a folder, and we'll add index.html to the end of the path to load that.
     path: string;
-    if ends_with(request.path, "/") {
+    found := contains(request.path, "./") || contains(request.path, "../");
+    if found {
+      send_response(request, "Forbidden path traversal.", status_code = 403);
+    } else if ends_with(request.path, "/") {
       path = tjoin(cwd, "/", the_static_folder_to_serve, request.path, "index.html");
     } else {
       path = tjoin(cwd, "/", the_static_folder_to_serve, request.path);

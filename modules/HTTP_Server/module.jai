@@ -246,7 +246,7 @@ file_cache_get_or_create :: (filename: string) -> File_Cache_Record, bool {
   file_cache_record.rawcontent = filetext;
 
   content_type := extension2contenttype(filename);
-  is_filecontent_text := find_index_from_left("content_type", "text/") == 0;
+  is_filecontent_text := find_index_from_left(content_type, "text/") == 0;
 
   #import,dir "modules/brotli";
   compressed := ifx is_filecontent_text then brotli_compress_text(filetext) else brotli_compress(filetext);

@@ -36,7 +36,9 @@ send_json     :: #bake_arguments send_response(content_type="application/json");
 send_response :: (request: *Request, content: string, status_code: u16 = 200, content_type: string = "text/plain", content_encoding: string = "") {
   // todo: status_code 404 is responding with "404 OK" lol
   content_encoding_header := ifx content_encoding then tprint("\r\nContent-Encoding: %", content_encoding) else "";
-  http_response := tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %; charset=UTF-8%\r\n\r\n%", status_code, content.count, content_type, content_encoding_header, content);
+  // a charset parameter breaks binary types: browsers refuse "application/wasm; charset=UTF-8"
+  charset := ifx begins_with(content_type, "text/") || content_type == "application/json" then "; charset=UTF-8" else "";
+  http_response := tprint("HTTP/1.1 % OK\r\nContent-Length: %\r\nContent-Type: %%%\r\n\r\n%", status_code, content.count, content_type, charset, content_encoding_header, content);
 
   request.response_sent = true;
 
@@ -284,6 +286,7 @@ extension2contenttype :: (filename: string) -> string {
     case ".ini";  return "text/plain";
     case ".txt";  return "text/plain";
     case ".exe";  return "application/octet-stream";
+    case ".wasm"; return "application/wasm";
   }
 
   return "text/html";

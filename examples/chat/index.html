@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>chat</title>
+        <style>
+            body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 0 1rem; }
+            #log { list-style: none; padding: 0; min-height: 12rem; border: 1px solid #ccd; border-radius: 6px; margin: 0 0 .75rem; overflow-y: auto; max-height: 20rem; }
+            #log li { padding: .35rem .6rem; border-bottom: 1px solid #eef; }
+            #status { color: #567; }
+            .row { display: flex; gap: .5rem; }
+            #message { flex: 1; padding: .4rem; }
+        </style>
+    </head>
+    <body>
+        <h1>chat</h1>
+        <p>Needs the native server: <code>examples/server/server</code>, then open this page from it.</p>
+        <main id="app"></main>
+        <script type="module">
+            import { start } from "../../web/glue.js";
+            start("./main.wasm");
+        </script>
+    </body>
+</html>

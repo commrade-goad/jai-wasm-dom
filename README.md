@@ -9,9 +9,12 @@ Demo: https://commrade-goad.github.io/jai-wasm-dom/
 ```
 modules/Web/        the library: #import "Web" gives you dom_*, http_*, ws_*, timer_*, worker_*
 modules/Web_Build/  build-time helper: build_wasm(...)
+modules/HTTP_Server/ native HTTP/WebSocket server (router, middleware, static files), not for wasm
 modules/Template/   .jaix templates -> Jai (used by Web_Build)
 web/                JS host: glue.js (page), worker-glue.js (workers), runtime.js (shared)
 examples/hello      smallest app: one HTTP request
+examples/chat       chat client: fetch + WebSocket + timers against the native server
+examples/server     native dev server (modules/HTTP_Server) that serves the repo and the wasm examples
 examples/custom-js   calling your own JavaScript (window.*, navigator.*) from Jai
 examples/todos      counter + todo list with .jaix templates
 examples/selftest   Async/Worker self-test (python3 examples/selftest/test/run.py)
@@ -126,3 +129,19 @@ size, is_binary, ok := custom_read_message(js_window_size());   // then custom_f
 `value(payload)`, `handle(callback, data)` (`emit`, `fail`, `onClose`) and `exports` (the program's wasm exports).
 Pointers and `s64` cross the boundary as `BigInt`, `s32` as `Number`; this applies to what you return too.
 A payload is a string, bytes, or anything JSON-able. Promises map to `h.emit(...)` / `h.fail(error)`.
+
+## Serving the examples: `examples/server`
+
+A native program (not wasm) built on `modules/HTTP_Server`. It serves the repo root, so every example
+page and `web/glue.js` load from it, and wasm is sent as `application/wasm` (browsers refuse anything else).
+
+```sh
+./build.sh examples/server          # native build, needs libssl-dev (HTTP_Server links OpenSSL)
+examples/server/server              # http://localhost:8000
+examples/server/server 9000 /dir    # another port / root (works from any directory)
+```
+
+Besides static files it has `GET /api/hello/:name`, `GET /api/info`, `POST /api/echo` and a chat
+WebSocket at `/ws`, which `examples/chat` (built with `JAIC_WASM_LD=... ./build.sh examples/chat`) talks to.
+`python3 examples/server/test/run.py` starts the server and drives all the wasm pages in headless Chromium
+(needs `pip install playwright`).

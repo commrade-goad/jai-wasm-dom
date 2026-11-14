@@ -575,11 +575,9 @@ method_bit :: (method: METHOD) -> u32 {
 // the methods of the routes that match the path. Routes for any method are middleware, they don't count.
 allowed_methods :: (path: string) -> u32 {
   mask: u32;
-  lock(*routes_lock);
-  defer unlock(*routes_lock);
-  for middlewares {
+  for router_find(path) {
     if it.method == .ANY || it.path == "*" continue;
-    if match_route(it.path, path, null)  mask |= method_bit(it.method);
+    mask |= method_bit(it.method);
   }
   return mask;
 }

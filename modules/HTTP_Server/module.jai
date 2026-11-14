@@ -6,6 +6,7 @@
 #load "static.jai";
 #load "middleware.jai";
 #load "extras.jai";
+#load "router.jai";
 
 #if OS == .WINDOWS #load "windows.jai";
 #if OS == .LINUX   #load "linux.jai";
@@ -68,6 +69,7 @@ add_route :: (method: METHOD, path: string, cb: (*Request)->(), data: *void) {
   lock(*routes_lock);
   defer unlock(*routes_lock);
   array_add(*middlewares, .{method=method, cb=cb, path=normalize_path(path), data=data});
+  router_insert(cast(s32) (middlewares.count - 1), middlewares[middlewares.count - 1].path);
 }
 
 get     :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.GET,     path, cb, data); }
@@ -311,27 +313,19 @@ handle_request :: (request: *Request) {
     }
   }
 
-  // let the user's middleware handle the request!
-  // use tries instead of a for loop ... @perf
-  i := 0;
-  while true {
-    lock(*routes_lock);
-    if i >= middlewares.count { unlock(*routes_lock); break; }
-    middleware := middlewares[i];
-    unlock(*routes_lock);
-    i += 1;
+  // the routes that match this path, in the order they were added. A route that doesn't respond is
+  // middleware: the request goes on to the next one.
+  for router_find(path_normal) {
+    if request.response_sent break; // once a route handles the request, we stop. this is first because webhook could've handled it already
 
-    if request.response_sent then break; // once a middleware handles the request, we stop. this is first because webhook could've handled it already
-
-    method_matches := middleware.method == .ANY || middleware.method == request.method || (request.method == .HEAD && middleware.method == .GET);
+    method_matches := it.method == .ANY || it.method == request.method || (request.method == .HEAD && it.method == .GET);
     if !method_matches continue;
-    if !match_route(middleware.path, path_normal, null) continue;
 
     table_reset(*request.params); // maybe this should happen somewhere else?
-    if contains(middleware.path, ":") match_route(middleware.path, path_normal, request);
+    if contains(it.path, ":") match_route(it.path, path_normal, request);
 
-    request.data = middleware.data;
-    middleware.cb(request);
+    request.data = it.data;
+    it.cb(request);
   }
 
   // if none of the middleware responded to this request, 404

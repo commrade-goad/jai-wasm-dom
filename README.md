@@ -145,3 +145,26 @@ Besides static files it has `GET /api/hello/:name`, `GET /api/info`, `POST /api/
 WebSocket at `/ws`, which `examples/chat` (built with `JAIC_WASM_LD=... ./build.sh examples/chat`) talks to.
 `python3 examples/server/test/run.py` starts the server and drives all the wasm pages in headless Chromium
 (needs `pip install playwright`).
+
+
+## HTTP_Server Benchmark
+The Server is tested on Claude with this specification:
+- **CPU:** 1 vCPU of Intel Xeon Processor @ 2.10 GHz
+- **Memory:** 4 GB
+
+| 64 connections unless noted | Jai req/s | Fiber req/s | Jai ÷ Fiber | Jai p99 | Fiber p99 |
+|-----------------------------|-----------|-------------|-------------|---------|-----------|
+| plaintext                   | 114k      | 104k        | 1.09x       | 1.1 ms  | 1.9 ms    |
+| json                        | 106k      | 100k        | 1.06x       | 1.3 ms  | 1.8 ms    |
+| :id param, 1000 routes      | 95k       | 94k         | 1.02x       | 1.9 ms  | 2.1 ms    |
+| security headers            | 92k       | 84k         | 1.10x       | 1.9 ms  | 2.5 ms    |
+| request id                  | 111k      | 92k         | 1.20x       | 1.1 ms  | 2.3 ms    |
+| compress, small body        | 120k      | 106k        | 1.13x       | 1.0 ms  | 1.7 ms    |
+| all 3 middleware            | 100k      | 82k         | 1.22x       | 1.7 ms  | 2.7 ms    |
+| 2 KB, no compression        | 87k       | 77k         | 1.13x       | 3.8 ms  | 2.9 ms    |
+| 2 KB, brotli                | 38k       | 27k         | 1.39x       | 113 ms  | 50 ms     |
+| static file                 | 66k       | 49k         | 1.35x       | 7.4 ms  | 4.2 ms    |
+| 1 connection                | 91k       | 77k         | 1.17x       | 34 µs   | 142 µs    |
+| 16 connections              | 96k       | 121k        | 0.79x       | 0.36 ms | 0.52 ms   |
+| 256 connections             | 101k      | 95k         | 1.06x       | 4.3 ms  | 6.5 ms    |
+| 2048 connections            | 82k       | 58k         | 1.41x       | 58 ms   | 47 ms     |

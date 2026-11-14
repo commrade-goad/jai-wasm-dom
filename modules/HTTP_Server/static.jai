@@ -50,16 +50,18 @@ static_handler :: (request: *Request) {
   full := ifx clean.count > 0 then tjoin(root, "/", clean) else root;
 
   wants_folder := clean.count == 0 || ends_with(decoded, "/");
-  if !wants_folder && is_directory(full) {
+  if wants_folder full = tjoin(full, "/", options.index_file);
+
+  info := stat_file(full); // the only stat of this request: serve_file gets it too
+  if !wants_folder && info.is_dir {
     // /examples/hello -> /examples/hello/ , otherwise the relative URLs inside its index.html resolve against the wrong folder.
     // Built from the cleaned path, never from the raw one: "//host" must not become a redirect to another site.
     location := tjoin("/", clean, "/", ifx request.query.count > 0 then "?" else "", request.query);
     redirect(request, location, 301);
     return;
   }
-  if wants_folder full = tjoin(full, "/", options.index_file);
 
-  if serve_file(request, full, options) return;
+  if serve_file(request, full, options, info) return;
 
   if options.spa_fallback {
     last_slash := find_index_from_right(decoded, #char "/");
@@ -83,8 +85,8 @@ static_options_or_defaults :: () -> Static_Options {
 }
 
 // returns false (and sends nothing) if the file can't be read
-serve_file :: (request: *Request, filename: string, options: Static_Options) -> bool {
-  record, success := file_cache_get(filename, options);
+serve_file :: (request: *Request, filename: string, options: Static_Options, known: File_Stat = .{}) -> bool {
+  record, success := file_cache_get(filename, options, known);
   if !success return false;
 
   content_type := extension2contenttype(filename);
@@ -138,6 +140,50 @@ serve_file :: (request: *Request, filename: string, options: Static_Options) -> 
 }
 
 
+// What static needs to know about a path, from ONE stat() call. It used to be two: is_directory() in
+// static_handler and file_modtime_and_size() in file_cache_get(), each of them making a C string and freeing it.
+File_Stat :: struct {
+  known      : bool; // stat_file() was called: hand the result on, nobody has to ask again
+  exists     : bool;
+  is_dir     : bool;
+  size       : s64;
+  modtime_ms : s64;
+}
+
+#if OS == .LINUX {
+  stat_file :: (path: string) -> File_Stat {
+    result: File_Stat;
+    result.known = true;
+    if path.count == 0 || path.count >= 4096 return result;
+
+    buffer: [4096] u8 = ---; // not zeroed: only the end is set
+    memcpy(buffer.data, path.data, path.count);
+    buffer[path.count] = 0;
+
+    info: stat_t;
+    if stat(buffer.data, *info) != 0 return result;
+
+    result.exists     = true;
+    result.is_dir     = S_ISDIR(info.st_mode);
+    result.size       = info.st_size;
+    result.modtime_ms = info.st_mtime.tv_sec * 1000 + info.st_mtime.tv_nsec / 1000000;
+    return result;
+  }
+} else {
+  stat_file :: (path: string) -> File_Stat {
+    result: File_Stat;
+    result.known = true;
+    modtime, size, found := file_modtime_and_size(path);
+    if !found return result;
+    directory, _ := is_directory(path);
+    result.exists     = true;
+    result.is_dir     = directory;
+    result.size       = size;
+    result.modtime_ms = to_milliseconds(modtime);
+    return result;
+  }
+}
+
 // when we cache a file, we store both the raw content and also the brotli compressed version of it.
 // A record is only valid for the size and modification time it was read with, so editing or
 // rebuilding a file on disk is picked up by the very next request.
@@ -152,10 +198,12 @@ File_Cache_Record :: struct {
 file_cache: Table(string, File_Cache_Record);
 file_cache_lock: Mutex; // the epoll threads all share this cache
 
-file_cache_get :: (filename: string, options: Static_Options) -> File_Cache_Record, bool {
-  modtime, size, stat_ok := file_modtime_and_size(filename);
-  if !stat_ok return .{}, false;
-  modtime_ms := to_milliseconds(modtime);
+file_cache_get :: (filename: string, options: Static_Options, known: File_Stat = .{}) -> File_Cache_Record, bool {
+  info := known;
+  if !info.known  info = stat_file(filename);
+  if !info.exists || info.is_dir return .{}, false;
+  size := info.size;
+  modtime_ms := info.modtime_ms;
 
   lock(*file_cache_lock);
   found, record := table_find(*file_cache, filename);

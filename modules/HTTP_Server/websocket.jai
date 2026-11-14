@@ -53,8 +53,12 @@ Websocket_Parsing_Frame_State :: struct {
 
 
 
-all_websockets    : Table(Socket, Websocket);
-websocket_servers : Table(string, Websocket_Server);
+// Connections and servers live on the heap and the tables hold pointers to them: a Table that grows
+// moves its values, and every pointer into it (like websocket_server.websockets) would dangle.
+// The tables and the websockets arrays are shared by all the epoll threads: ws_lock guards them.
+all_websockets    : Table(Socket, *Websocket);
+websocket_servers : Table(string, *Websocket_Server);
+ws_lock           : Mutex;
 
 Websocket :: struct {
   #as socket    : MySocket;
@@ -88,63 +92,86 @@ Websocket_Server :: struct {
 // listens for websockets trying to connect at this path
 websocket_listen :: (path: string = "") -> *Websocket_Server {
   assert(listen_called, "http_listen must be called before websocket_listen");
-  assert(table_find_pointer(*websocket_servers, path) == null, "websocket already listening on this path");
 
-  ws_server: Websocket_Server;
-  ws_server.path = normalize_path(path);
+  lock(*ws_lock);
+  defer unlock(*ws_lock);
 
-  return table_set(*websocket_servers, ws_server.path, ws_server);
+  normalized_path := normalize_path(path);
+  assert(table_find_pointer(*websocket_servers, normalized_path) == null, "websocket already listening on this path");
+
+  ws_server := New(Websocket_Server);
+  ws_server.path = copy_string(normalized_path);
+  table_set(*websocket_servers, ws_server.path, ws_server);
+  return ws_server;
 }
 
 // broadcast msg to all OTHER websockets on the server
 websocket_broadcast :: (ws: *Websocket, payload: string, op_code: Websocket.OPCODE = .TEXT) {
+  frame := websocket_make_frame(payload, op_code);
+
+  lock(*ws_lock); // nobody can add or delete a websocket while we walk the list
+  defer unlock(*ws_lock);
   for ws.server.websockets {
     if it == ws continue; // don't broadcast to ourselves
-    websocket_send(it, payload, op_code);
+    websocket_write_frame(it, frame);
   }
 }
 
 // the most common way to send a message to a websocket. besides broadcast
 websocket_send :: (ws: *Websocket, payload: string = "", op_code: Websocket.OPCODE = .TEXT) {
+  frame := websocket_make_frame(payload, op_code);
 
-  fin_bit :: 0b_10000000;
-
-  // fast path for small payloads
-  if (payload.count <= 125) {
-    header_byte_count := 2;
-    buffer := talloc_string(header_byte_count + payload.count);
-    buffer[0] = xx op_code | fin_bit;
-    buffer[1] = cast(u8)payload.count;
-    if payload.count then memcpy(*buffer[2], payload.data, payload.count);
-    websocket_send_bytes(ws, buffer);
-    return;
-  }
-
-
-  header: string;
-
-  if (payload.count < 65536) {
-    header = talloc_string(4);
-    header[0] = xx op_code | fin_bit;
-    header[1] = 126;
-    memcpy(*header[2], *endian_swap(cast(u16)payload.count), 2);
-
-  } else {
-    header = talloc_string(10);
-    header[0] = xx op_code | fin_bit;
-    header[1] = 127;
-    memcpy(*header[2], *endian_swap(cast(u64)payload.count), 8);
-  }
-
-  websocket_send_bytes(ws, header);
-  websocket_send_bytes(ws, payload);
+  lock(*ws_lock); // keeps two threads from interleaving their frames on the same socket
+  defer unlock(*ws_lock);
+  websocket_write_frame(ws, frame);
 }
 
+// header and payload in ONE buffer, so a frame is written (or fails) as a whole
+websocket_make_frame :: (payload: string, op_code: Websocket.OPCODE) -> string {
+  fin_bit :: 0b_10000000;
 
+  header_byte_count := 2;
+  if payload.count >= 65536      header_byte_count = 10;
+  else if payload.count > 125    header_byte_count = 4;
 
-
+  frame := talloc_string(header_byte_count + payload.count);
+  frame[0] = xx op_code | fin_bit;
+  if header_byte_count == 2 {
+    frame[1] = cast(u8)payload.count;
+  } else if header_byte_count == 4 {
+    frame[1] = 126;
+    memcpy(*frame[2], *endian_swap(cast(u16)payload.count), 2);
+  } else {
+    frame[1] = 127;
+    memcpy(*frame[2], *endian_swap(cast(u64)payload.count), 8);
+  }
+  if payload.count then memcpy(frame.data + header_byte_count, payload.data, payload.count);
+  return frame;
+}
 
 #scope_module
+
+websocket_server_listening :: (path_normal: string) -> bool {
+  lock(*ws_lock);
+  defer unlock(*ws_lock);
+  return table_find_pointer(*websocket_servers, path_normal) != null;
+}
+
+websocket_find :: (socket: Socket) -> *Websocket {
+  lock(*ws_lock);
+  defer unlock(*ws_lock);
+  found := table_find_pointer(*all_websockets, socket);
+  if !found return null;
+  return found.*;
+}
+
+// Reads what the client sent. A websocket is only ever deleted from here, by the thread
+// that owns its socket, and never from inside a send: deleting a connection while
+// websocket_read_frame or a broadcast loop is still using it is a use after free.
+websocket_service :: (ws: *Websocket) {
+  websocket_read_frame(ws);
+  if ws.err websocket_delete(ws);
+}
 
 websocket_handle_request :: (request: *Request) {
 
@@ -164,11 +191,12 @@ websocket_handle_request :: (request: *Request) {
 
   websocket_send_request_handshake_accepted(request);
 
+  request.upgraded = true;
+
   ws := websocket_new(request);
   if ws.server.onopen then ws.server.onopen(ws);
 
-  websocket_read_frame(ws);
-  if ws.err then mylog("unhandled websocket error!!!!");
+  websocket_service(ws);
 
 }
 
@@ -194,8 +222,9 @@ websocket_read_frame :: (ws: *Websocket) {
 
     #if OS==.LINUX if bytes_received < 0 && errno() == EWOULDBLOCK return;
 
-    if bytes_received == 0 Error(""); // this maybe isn't an error? on connection that aren't keep-alive?
-    if bytes_received < 0  Error("");
+    if bytes_received == 0 { ws.err = true; return; } // the client closed the connection: normal, not worth a log line
+    #if OS==.LINUX if bytes_received < 0 && errno() == EINTR continue;
+    if bytes_received < 0  Error("recv failed");
 
     bytes_read += bytes_received;
 
@@ -264,7 +293,8 @@ websocket_read_frame :: (ws: *Websocket) {
           if #complete op_code == {
 
             case .CLOSE; {
-              websocket_delete(ws);
+              websocket_send(ws, op_code = .CLOSE); // finish the closing handshake
+              ws.err = true;                        // websocket_service deletes us
               return;
             }
 
@@ -279,7 +309,7 @@ websocket_read_frame :: (ws: *Websocket) {
               if msdiff < 0 || msdiff > 10000 {
                 // ping too large, kill it
                 websocket_send(ws, op_code = .CLOSE);
-                websocket_delete(ws);
+                ws.err = true;
                 return;
               }
               ws.pingms = xx msdiff;
@@ -347,43 +377,62 @@ websocket_read_frame :: (ws: *Websocket) {
 
 #scope_file
 
-websocket_new :: (request: Request) -> *Websocket {
-  ws := table_add(*all_websockets, request.socket, .{});
+websocket_new :: (request: *Request) -> *Websocket {
+  ws := New(Websocket);
   ws.socket = request.socket;
 
   path_normal := normalize_path(request.path);
 
+  lock(*ws_lock);
+  defer unlock(*ws_lock);
+
   websocket_server := table_find_pointer(*websocket_servers, path_normal);
   assert(websocket_server != null);
 
-  ws.server = websocket_server;
-  array_add(*websocket_server.websockets, ws);
+  ws.server = websocket_server.*;
+  table_set(*all_websockets, request.socket, ws);
+  array_add(*ws.server.websockets, ws);
 
   return ws;
 }
 
 websocket_delete :: (ws: *Websocket) {
-  if ws.server.onclose then ws.server.onclose(ws);
-
-  socket_close(ws.socket); // not sure if this is necessary. also it might already be closed?
-
-  // is unordered a problem?
+  // out of the registry first: after this no broadcast can reach us
+  lock(*ws_lock);
   table_remove(*all_websockets, ws.socket);
   array_unordered_remove_by_value(*ws.server.websockets, ws);
+  unlock(*ws_lock);
+
+  if ws.server.onclose then ws.server.onclose(ws);
+
+  socket_close(ws.socket); // only closed after the removal above, so the fd number can't be reused while we're still listed
 
   free(ws.parsing_state.buffer);               // these may or may not be allocated. freeing null isn't a problem, right?
   free(ws.parsing_state.payload_continuation); // these may or may not be allocated. freeing null isn't a problem, right?
+  free(ws);
 }
 
-
-websocket_send_bytes :: (ws: *Websocket, bytes: string) {
+// Writes a whole frame. send() on a non blocking socket can take only part of it, so keep going.
+// If the socket can't take the rest (the client is gone, or is not reading) the frame is cut short,
+// which makes the stream unusable: mark the websocket as failed. It is deleted by the thread that
+// owns it, the next time that thread looks at the socket. Never delete from here.
+websocket_write_frame :: (ws: *Websocket, frame: string) {
   if ws.err return;
 
-  sent_byte_count := send(ws.socket, bytes);
-  if sent_byte_count == -1 {
-    ws.err = true;
-    websocket_delete(ws);
+  sent := 0;
+  while sent < frame.count {
+    result := send(ws.socket.socket, frame.data + sent, xx (frame.count - sent), 0);
+    if result < 0 && errno() == EINTR continue;
+    if result <= 0 {
+      ws.err = true;
+      return;
+    }
+    sent += result;
   }
+}
+
+websocket_send_bytes :: (ws: *Websocket, bytes: string) {
+  websocket_write_frame(ws, bytes);
 }
 websocket_send_ping :: (ws: *Websocket) {
   websocket_send(ws, op_code = .PING);

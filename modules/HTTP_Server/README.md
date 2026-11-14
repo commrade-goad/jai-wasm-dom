@@ -146,3 +146,36 @@ $ wrk --latency -t8 -c100 -d1 http://localhost
 ## Usage
 0. have the compiler Version: beta 0.1.090, built on 12 April 2024.
 1. run `examples/hello/run.bat` or `examples/hello/run.sh`
+
+## More than a router
+
+All of these are in `extras.jai`, see the comments there. `examples/server/main.jai` uses every one.
+
+```c
+api := group("/api");                         // groups: a shared prefix and shared middleware
+group_use(api, auth);                         //   middleware for everything under /api (routes added after it)
+group_get(api, "/users/:id", user_handler);
+
+user, found := get_form(request, "user");     // urlencoded and multipart fields
+file, found := get_file(request, "avatar");   // uploads: file.filename, file.content_type, file.data
+
+get_cookie(request, "theme");                 // cookies
+set_cookie(request, "theme", "dark", .{ max_age_seconds = 3600 });
+
+session_set(request, "user", "alice");        // sessions (in memory), kept through a cookie
+user, logged_in := session_get(request, "user");
+session_destroy(request);
+
+set_local(request, "user", ptr);              // pass something from a middleware to the handlers after it
+set_error_handler(my_handler);                // one place for every 400/404/405/413 the server makes
+use_compress();                               // brotli for responses that are not files
+use_request_id();                             // X-Request-ID
+http_wait_for_shutdown();                     // ctrl-c: finish the requests in progress, then return
+```
+
+Also: 405 with an `Allow` header (and `OPTIONS` answered) when a path exists for other methods, `Range`
+requests (206/416) for static files, `print_routes()`, `json_quote()`.
+
+Not here: panic recovery (a crash is a crash, there are no exceptions), a request timeout (handlers run on the
+epoll thread and can't be interrupted), gzip (no zlib in the stdlib, only brotli), JSON binding into structs
+(no JSON module in the stdlib).

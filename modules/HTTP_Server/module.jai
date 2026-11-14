@@ -1,6 +1,11 @@
 
 
 #load "websocket.jai";
+#load "http_util.jai";
+#load "request.jai";
+#load "static.jai";
+#load "middleware.jai";
+#load "extras.jai";
 
 #if OS == .WINDOWS #load "windows.jai";
 #if OS == .LINUX   #load "linux.jai";
@@ -8,50 +13,148 @@
 // the main entry point is http_listen, which is defined in linux.jai and windows.jai
 
 
+// Settings that can be changed before http_listen().
+Server_Options :: struct {
+  // head + body of a single request. Anything bigger is answered with 413 and the connection is dropped.
+  max_request_bytes      : s64     = 1024 * 1024;
+  // a request that has started but is not complete after this many seconds is dropped (slow clients)
+  header_timeout_seconds : float64 = 15;
+  // a keep-alive connection that sends nothing for this long is closed. 0 disables the timeout.
+  idle_timeout_seconds   : float64 = 120;
+  // print one line per response: METHOD /path status bytes time
+  log_requests           : bool    = false;
+}
+http_options: Server_Options;
+
+// set by http_shutdown(): requests that are still running finish, and every response closes its connection
+shutting_down: bool;
+
+// called by http_listen
+http_common_init :: () {
+  init(*routes_lock);
+  init(*file_cache_lock);
+  init(*ws_lock);
+  init(*sessions_lock);
+}
 
 
-// todo: this method of looping through middlewares is slow @perf
+// ---------------------------------------------------------------------------------------
+// routes and middleware
+//
+// A route is a method + path + handler. For each request, the routes run in the order they were
+// added, and every one that matches gets called, until one of them sends a response. So a route
+// that doesn't respond acts as middleware: it can look at the request, call set_header(), and
+// let the request fall through to the next route.
+//
+//   path: "/users/:id"  matches /users/42, and get_param(request, "id") is "42"
+//         "/api/*"      matches /api and everything below it
+//         "*"           matches everything
+//
+// `data` is handed back to the handler as request.data, which lets one handler function serve
+// several routes with different settings.
+// ---------------------------------------------------------------------------------------
+
 middlewares: [..]Middleware;
+routes_lock: Mutex; // routes may be added while the server threads are already running
 
 Middleware :: struct {
   method: METHOD;
   path: string;
   cb: (*Request)->();
+  data: *void;
 }
 
-get    :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.GET,    cb=cb, path=normalize_path(path)}); }
-post   :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.POST,   cb=cb, path=normalize_path(path)}); }
-put    :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.PUT,    cb=cb, path=normalize_path(path)}); }
-delete :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.DELETE, cb=cb, path=normalize_path(path)}); }
-any    :: (path: string, cb: (*Request)->()) {array_add(*middlewares, .{method=.ANY,    cb=cb, path=normalize_path(path)}); }
-
-
-status_code_to_string :: inline (status_code: u16) -> string {
-    if status_code == {
-        case 200; return "OK";
-        case 404; return "Not Found";
-        case 403; return "Forbidden";
-        case    ; return "Not Known";
-        // ...
-    }
+add_route :: (method: METHOD, path: string, cb: (*Request)->(), data: *void) {
+  lock(*routes_lock);
+  defer unlock(*routes_lock);
+  array_add(*middlewares, .{method=method, cb=cb, path=normalize_path(path), data=data});
 }
 
+get     :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.GET,     path, cb, data); }
+post    :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.POST,    path, cb, data); }
+put     :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.PUT,     path, cb, data); }
+delete  :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.DELETE,  path, cb, data); }
+patch   :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.PATCH,   path, cb, data); }
+head    :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.HEAD,    path, cb, data); }
+options :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.OPTIONS, path, cb, data); }
+any     :: (path: string, cb: (*Request)->(), data: *void = null) { add_route(.ANY,     path, cb, data); }
+// a HEAD request is answered by the matching get route, with the body left off
 
+
+// ---------------------------------------------------------------------------------------
+// responses
+// ---------------------------------------------------------------------------------------
 
 send_html     :: #bake_arguments send_response(content_type="text/html");
 send_text     :: #bake_arguments send_response(content_type="text/plain");
 send_json     :: #bake_arguments send_response(content_type="application/json");
-send_response :: (request: *Request, content: string, status_code: u16 = 200, content_type: string = "text/plain", content_encoding: string = "") {
-  content_encoding_header := ifx content_encoding then tprint("\r\nContent-Encoding: %", content_encoding) else "";
-  charset := ifx begins_with(content_type, "text/") || content_type == "application/json" then "; charset=UTF-8" else "";
-  http_response := tprint("HTTP/1.1 % %\r\nContent-Length: %\r\nContent-Type: %%%\r\n\r\n%", status_code, status_code_to_string(status_code), content.count, content_type, charset, content_encoding_header, content);
 
+send_response :: (request: *Request, content: string, status_code: u16 = 200, content_type: string = "text/plain", content_encoding: string = "") {
+  push_allocator(temp);
+
+  charset := ifx begins_with(content_type, "text/") || content_type == "application/json" then "; charset=UTF-8" else "";
+  no_body := status_code == 204 || status_code == 304 || status_code < 200;
+
+  // use_compress(): compress what is not a file (files are compressed once, by static())
+  body := content;
+  encoding := content_encoding;
+  if !no_body && content_encoding.count == 0 {
+    compressed, did_compress := maybe_compress(request, content, content_type, status_code);
+    if did_compress { body = compressed; encoding = "br"; }
+  }
+
+  builder: String_Builder;
+  print_to_builder(*builder, "HTTP/1.1 % %\r\n", status_code, status_code_to_string(status_code));
+  if !no_body {
+    print_to_builder(*builder, "Content-Length: %\r\n", body.count);
+    print_to_builder(*builder, "Content-Type: %%\r\n", content_type, charset);
+  }
+  if encoding.count > 0  print_to_builder(*builder, "Content-Encoding: %\r\n", encoding);
+  for request.res_headers  print_to_builder(*builder, "%: %\r\n", it.name, it.value);
+  if request.close_after  append(*builder, "Connection: close\r\n");
+  append(*builder, "\r\n");
+  head := builder_to_string(*builder);
+
+  // a HEAD response has the headers of the GET response, but no body
+  http_response := ifx no_body || request.method == .HEAD then head else tprint("%%", head, body);
+
+  write_response(request, http_response, status_code, body.count);
+}
+
+// the status line and headers only: 304 Not Modified, 204 No Content, ...
+send_empty :: (request: *Request, status_code: u16) {
+  send_response(request, "", status_code = status_code);
+}
+
+// a plain text response with the standard text of the status: send_status(request, 404) says "Not Found"
+send_status :: (request: *Request, status_code: u16) {
+  send_error(request, status_code);
+}
+
+redirect :: (request: *Request, location: string, status_code: u16 = 302) {
+  set_header(request, "Location", location);
+  send_response(request, "", status_code = status_code);
+}
+
+// Adds a header to the response of this request. Both strings are used when the response is
+// sent, which happens during the same request, so literals and tprint() results are fine.
+Header_Pair :: struct { name: string; value: string; }
+set_header :: (request: *Request, name: string, value: string) {
+  // replace instead of adding a second one
+  for * request.res_headers {
+    if compare_nocase(it.name, name) == 0 { it.value = value; return; }
+  }
+  array_add(*request.res_headers, .{name, value});
+}
+
+write_response :: (request: *Request, http_response: string, status_code: u16, body_bytes: s64) {
   request.response_sent = true;
 
   #if OS == .WINDOWS {
     mysocket_write(request.socket, http_response);
   } else {
     bytes_sent := mysocket_write(request.socket, http_response);
+    if bytes_sent < 0  bytes_sent = 0; // would block (or the client is gone, which the read side will notice)
     if bytes_sent < http_response.count {
       write_data := alloc_string(http_response.count - bytes_sent);
       memcpy(write_data.data, http_response.data + bytes_sent, write_data.count);
@@ -60,23 +163,11 @@ send_response :: (request: *Request, content: string, status_code: u16 = 200, co
       continue_write(request);
     }
   }
-}
 
-send_file :: (request: *Request, raw_filename: string) {
-  filename := normalize_filename(raw_filename);
-
-  file_cache_record, success := file_cache_get_or_create(filename);
-  if !success return;
-
-  // for very small files, it's possible that brotli encoding is longer than the raw content.
-  // in that case the brotli api will return the brotli encoding as ""
-  // and so we will return the raw content instead, even though the client accepts br encoding
-  are_we_returning_br := does_request_accept_encoding(request, "br") && file_cache_record.brotli != "";
-
-  content := ifx are_we_returning_br then file_cache_record.brotli else file_cache_record.rawcontent;
-  content_encoding := ifx are_we_returning_br then "br" else "";
-  content_type := extension2contenttype(filename);
-  send_response(request, content, content_type=content_type, content_encoding=content_encoding);
+  if http_options.log_requests {
+    microseconds := cast(s64) ((seconds_since_init() - request.start_time) * 1000000);
+    print("% % % % %us\n", request.method, request.path, status_code, body_bytes, microseconds);
+  }
 }
 
 
@@ -84,9 +175,10 @@ parseheaders :: true;
 Request :: struct {
   #as socket      : MySocket;
 
-  raw             : string; // entire raw http request
+  raw             : string; // the bytes read for this request (and maybe the start of the next one)
   body            : string; // pointer into raw
-  path            : string; // pointer into raw
+  path            : string; // pointer into raw. Just the path: the ?query is in request.query
+  query           : string; // pointer into raw. What follows the ? (not decoded), or ""
 
   content_length  : u32;
   method          : METHOD;
@@ -95,15 +187,34 @@ Request :: struct {
 
   params          : Table(string, string);
   #if parseheaders {
-    headers       : Table(string, string);
+    headers       : Table(string, string); // the names are lowercase: get_header() takes any case
   }
+
+  res_headers     : [..] Header_Pair; // see set_header()
+  locals          : Table(string, *void); // see set_local()
+  request_id      : string;           // see use_request_id()
+  session         : *Session;         // see session_get()
+  compress_quality   : s32;           // see use_compress(): 0 is off
+  compress_min_bytes : s64;
+  data            : *void;            // the `data` of the route that is currently running
+  start_time      : float64;
 
   response_sent   : bool;
   err             : bool;
+  close_after     : bool; // answer, then close the connection (Connection: close, HTTP/1.0)
+  upgraded        : bool; // this connection became a websocket
+  connected       : bool;
+  expects_continue: bool;
 
   #if OS == .LINUX {
-    buffercursor     : u32;
-    startofline      : u32;
+    raw_capacity     : s64;  // allocated size of raw
+    head_end         : s64;  // offset of the body: set once the head is parsed
+    head_parsed      : bool;
+    continue_sent    : bool;
+    search_from      : s64;
+    request_len      : s64;  // head + body of the finished request, anything after it in raw is the next one
+    last_activity    : float64;
+    thread_id        : s32;
 
     write_data       : string;
     write_bytes_sent : int;
@@ -111,50 +222,89 @@ Request :: struct {
     epoll_fd         : s32;
   }
 
+  // the value of a :name in the route. "" if the route has no such parameter.
   get_param :: (request: *Request, name: string) -> string {
     found, val := table_find(*request.params, name);
     if !found return "";
-    return val;
+    decoded, ok := percent_decode(val);
+    return ifx ok then decoded else val;
   }
 }
 operator == :: inline (a: Request, b: Request) -> bool {return a.socket == b.socket; }
 
 does_request_accept_encoding :: (request: *Request, encoding: string) -> bool {
   if !request.accept_encoding return false;
-  for encoding: split(request.accept_encoding, ",") {
-    if trim(encoding, " ") == encoding return true;
+  for part: split(request.accept_encoding, ",") {
+    token := trim(part, " \t");
+    // "br;q=0.8": the part after the ; is the preference. q=0 means "never".
+    semicolon := find_index_from_left(token, #char ";");
+    if semicolon != -1 {
+      parameters := slice(token, semicolon + 1, token.count - semicolon - 1);
+      token.count = semicolon;
+      if trim(parameters, " ") == "q=0" || trim(parameters, " ") == "q=0.0" continue;
+    }
+    if compare_nocase(token, encoding) == 0 return true;
+  }
+  return false;
+}
+
+
+// splits the next /segment off the front of s
+next_segment :: (s: *string) -> string, bool {
+  str := s.*;
+  while str.count > 0 && str[0] == #char "/" { str.data += 1; str.count -= 1; }
+  if str.count == 0 { s.* = str; return "", false; }
+  end := 0;
+  while end < str.count && str[end] != #char "/"  end += 1;
+  segment := str;
+  segment.count = end;
+  str.data  += end;
+  str.count -= end;
+  s.* = str;
+  return segment, true;
+}
+
+// does the route pattern match the path? With `request` set, also stores the :params
+match_route :: (pattern: string, path: string, request: *Request) -> bool {
+  if pattern == "*" return true;
+
+  pattern_rest := pattern;
+  path_rest := path;
+  while true {
+    pattern_segment, has_pattern_segment := next_segment(*pattern_rest);
+    if !has_pattern_segment {
+      _, has_more_path := next_segment(*path_rest);
+      return !has_more_path; // both ran out together
+    }
+    if pattern_segment == "*" return true; // "/api/*" matches everything below /api (and /api itself)
+
+    path_segment, has_path_segment := next_segment(*path_rest);
+    if !has_path_segment return false;
+
+    if pattern_segment[0] == #char ":" {
+      if request {
+        name := pattern_segment;
+        name.data += 1;
+        name.count -= 1;
+        table_set(*request.params, name, path_segment);
+      }
+    } else if pattern_segment != path_segment {
+      return false;
+    }
   }
   return false;
 }
 
 handle_request :: (request: *Request) {
-
-  contains_prams :: (s: string) -> bool {
-    return contains(s, ":");
-  }
-
-  is_path_match :: (a: string, b: string) -> bool {
-    if !contains_prams(a) return a == b;
-
-    parts_a := split(a, "/");
-    parts_b := split(b, "/");
-    if parts_a.count != parts_b.count return false;
-
-    for parts_a {
-      part_a := parts_a[it_index];
-      part_b := parts_b[it_index];
-      if !contains_prams(part_a) {
-        if part_a != part_b return false;
-      }
-    }
-
-    return true;
-  }
+  request.start_time = seconds_since_init();
+  request.res_headers.count = 0;
+  request.data = null;
+  if shutting_down  request.close_after = true;
 
   path_normal := normalize_path(request.path);
 
   if request.websocket_key {
-    if table_find_pointer(*websocket_servers, path_normal) {
+    if websocket_server_listening(path_normal) {
       websocket_handle_request(request);
     } else {
       // todo: received a websocket request for a path we're not listening to. maybe some kind of notification, send a proper decline response?
@@ -163,195 +313,58 @@ handle_request :: (request: *Request) {
 
   // let the user's middleware handle the request!
   // use tries instead of a for loop ... @perf
-  for middleware: middlewares {
+  i := 0;
+  while true {
+    lock(*routes_lock);
+    if i >= middlewares.count { unlock(*routes_lock); break; }
+    middleware := middlewares[i];
+    unlock(*routes_lock);
+    i += 1;
 
     if request.response_sent then break; // once a middleware handles the request, we stop. this is first because webhook could've handled it already
 
-    if middleware.method != .ANY && middleware.method != request.method then continue;
-    // if middleware.path != "*" && middleware.path != request.path then continue;
-    if middleware.path != "*" && !is_path_match(middleware.path, path_normal) then continue;
+    method_matches := middleware.method == .ANY || middleware.method == request.method || (request.method == .HEAD && middleware.method == .GET);
+    if !method_matches continue;
+    if !match_route(middleware.path, path_normal, null) continue;
 
     table_reset(*request.params); // maybe this should happen somewhere else?
-    middleware_contains_params := contains_prams(middleware.path);
-    if middleware_contains_params {
-      middleware_path_split := split(middleware.path, "/");
-      request_path_split := split(path_normal, "/");
-      for middleware_path_split {
-        if !contains_prams(it) continue;
-        param_name := middleware_path_split[it_index];
-        param_name.data += 1;
-        param_name.count -= 1;
-        // array_add(request.params, request_path_split[it_index]);
-        // request.params[param_name] = request_path_split[it_index];
-        table_add(*request.params, param_name, request_path_split[it_index]);
-        // request.params[param_name] = request_path_split[it_index];
-      }
-    }
+    if contains(middleware.path, ":") match_route(middleware.path, path_normal, request);
 
+    request.data = middleware.data;
     middleware.cb(request);
   }
 
   // if none of the middleware responded to this request, 404
-  if !request.response_sent then send_text(request, tprint("Cannot % %", request.method, request.path), status_code=404);
-}
-
-
-cwd: string;
-the_static_folder_to_serve: string;
-static :: (folder: string) {
-  assert(folder.count > 0, "folder to serve can't be an empty string");
-  assert(the_static_folder_to_serve.count == 0, "you can't currently static serve more than 1 folder");
-
-  cwd = copy_string(get_working_directory());
-  the_static_folder_to_serve = folder;
-
-  get("*", (request: *Request) {;
-    // if the path ends wht a / then we consider it a folder, and we'll add index.html to the end of the path to load that.
-    path: string;
-    found := contains(request.path, "./") || contains(request.path, "../");
-    if found {
-      send_response(request, "Forbidden path traversal.", status_code = 403);
-    } else if ends_with(request.path, "/") {
-      path = tjoin(cwd, "/", the_static_folder_to_serve, request.path, "index.html");
+  if !request.response_sent {
+    // the path exists, but not for this method?
+    mask := allowed_methods(path_normal);
+    wanted := ifx request.method == .HEAD then METHOD.GET else request.method;
+    if request.method == .OPTIONS && mask != 0 {
+      set_header(request, "Allow", allow_header_value(mask));
+      send_empty(request, 204);
+    } else if mask != 0 && (mask & method_bit(wanted)) == 0 {
+      set_header(request, "Allow", allow_header_value(mask));
+      send_error(request, 405, tprint("Cannot % %", request.method, request.path));
     } else {
-      path = tjoin(cwd, "/", the_static_folder_to_serve, request.path);
+      send_error(request, 404, tprint("Cannot % %", request.method, request.path));
     }
-
-    send_file(request, path);
-  });
-}
-
-
-
-
-// when we cache a file, we store both the raw content and also the brotli compressed version of it
-File_Cache_Record :: struct {rawcontent: string; brotli: string; }
-file_cache: Table(string, File_Cache_Record);
-
-file_cache_get_or_create :: (filename: string) -> File_Cache_Record, bool {
-
-  #if OS != .WINDOWS { // don't actually cache files on windows. for better development experience
-    found, record := table_find(*file_cache, filename);
-    if found then return record, true;
   }
-
-  filetext, success := read_entire_file(filename);
-  if !success return .{}, false;
-
-
-  // just incase filename is in temporary storage
-  // we have to leak a copy of it here to store in the table that won't turn to garbage
-  filename_allocated := copy_string(filename);
-  file_cache_record := table_set(*file_cache, filename_allocated, .{});
-  file_cache_record.rawcontent = filetext;
-
-  content_type := extension2contenttype(filename);
-  is_filecontent_text := find_index_from_left(content_type, "text/") == 0;
-
-  #import,dir "modules/brotli";
-  compressed := ifx is_filecontent_text then brotli_compress_text(filetext) else brotli_compress(filetext);
-  file_cache_record.brotli = compressed;
-
-  return file_cache_record, true;
 }
 
 
-
-
-
-
-METHOD :: enum u8 {ANY; GET; POST; PUT; DELETE;}
+METHOD :: enum u8 {ANY; GET; POST; PUT; DELETE; PATCH; HEAD; OPTIONS;}
 to_METHOD :: (str: string) -> METHOD {
   if str == {
     case "GET";     return .GET;
     case "POST";    return .POST;
     case "PUT";     return .PUT;
     case "DELETE";  return .DELETE;
+    case "PATCH";   return .PATCH;
+    case "HEAD";    return .HEAD;
+    case "OPTIONS"; return .OPTIONS;
     case;           return .ANY;
   }
 }
-
-
-// Content-Type aka MIME type
-extension2contenttype :: (filename: string) -> string {
-  index_of_dot := find_index_from_right(filename, ".");
-  if index_of_dot == -1 return "text/html";
-
-  extension := substr(filename, index_of_dot, filename.count-index_of_dot);
-
-  if extension == {
-    case ".css";  return "text/css";
-    case ".js";   return "text/javascript";
-    case ".mps";  return "audio/mpeg";
-    case ".png";  return "image/png";
-    case ".webm"; return "video/webm";
-    case ".webp"; return "image/webp";
-    case ".gif";  return "image/gif";
-    case ".ico";  return "image/x-icon";
-    case ".jpg";  return "image/jpeg";
-    case ".jpeg"; return "image/jpeg";
-    case ".svg";  return "image/svg+xml";
-    case ".ini";  return "text/plain";
-    case ".txt";  return "text/plain";
-    case ".exe";  return "application/octet-stream";
-    case ".wasm"; return "application/wasm";
-  }
-
-  return "text/html";
-}
-
-
-normalize_path :: (path: string) -> string { return trim(path, "/"); }
-
-normalize_filename :: (raw_filename: string) -> string {
-  filename := raw_filename;
-
-  { // strip questionmark from filename if it exists ex: main.js?293849203
-    questionmark_location_in_filename := find_index_from_left(filename, #char "?");
-    if questionmark_location_in_filename != -1 {
-      filename.count = questionmark_location_in_filename;
-    }
-  }
-
-  { // replace %xx with xx conveted to a hex byte
-    start_index := 0;
-    while true {
-      percent_location_in_filename := find_index_from_left(filename, #char "%", start_index);
-      percent_escape_exists := percent_location_in_filename != -1;
-      if !percent_escape_exists break;
-      // todo check that there's actually 2 hex chars after the percent
-      // ^ this probably can currently crash the server
-      // todo make sure it's valid hex? not sure how this should be handled if it's not? probably just ignored?
-      hex_chars := substr(filename, percent_location_in_filename + 1, 2);
-      string_byte := hex_chars_to_byte(hex_chars);
-
-      filename.data[percent_location_in_filename] = string_byte;
-      copy_starting_from := percent_location_in_filename + 1 + 2;
-      memcpy(filename.data + percent_location_in_filename + 1, filename.data + copy_starting_from, filename.count-copy_starting_from);
-      filename.count -= 2;
-
-      start_index = percent_location_in_filename + 1;
-    }
-  }
-
-  return filename;
-}
-
-hex_char_to_int :: (char: u8) -> u8 {
-  if char >= #char "a" return (char - #char "a" + 0xA);
-  if char >= #char "A" return (char - #char "A" + 0xA);
-  if char >= #char "0" return (char - #char "0");
-  return 1;
-}
-hex_chars_to_byte :: (chars: string) -> u8 {
-  assert(chars.count == 2);
-  return hex_char_to_int(chars[0]) * 16 + hex_char_to_int(chars[1]);
-}
-
-
-
-
-
 
 
 mysocket_read :: (socket: Socket, buffer: *u8, bufferlen: s32) -> s64 {
@@ -375,3 +388,4 @@ mysocket_write :: (socket: Socket, buffer: string) -> s64 {
 
 
 #import "String";
+#import "Thread";
